@@ -26,8 +26,10 @@ struct Endfield_GachaApp: App {
             #if os(macOS)
             // macOS:保持现有体验。AppConfig 注入但 ContentView 暂未使用,
             // 留作以后统一时接入。
+            // 改为 ScrollView 包裹方案后,只约束最小宽度,不再强制 1100 高度,
+            // 小屏 MacBook 可以缩小窗口,内容通过滚动查看;大屏依然能充满。
             ContentView()
-                .frame(minWidth: 960, minHeight: 720)
+                .frame(minWidth: 960, minHeight: 600)
                 .environment(config)
             #else
             // iOS / iPadOS:三 Tab 布局

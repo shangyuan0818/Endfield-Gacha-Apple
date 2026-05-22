@@ -50,17 +50,23 @@ struct AnalysisView_iOS: View {
                         SummaryCardsView(charts: a)
                             .padding(.horizontal)
 
-                        // 折叠详细统计:两个卡池卡片(角色 / 武器),
+                        // 折叠详细统计: 三个卡池卡片 (特许 / 辉光 / 武器),
                         // iOS 上结构化排版替代原 PC 风格的等宽对齐文本。
+                        // v0.1.2.0: 加辉光庆典卡片.
                         DisclosureGroup(isExpanded: $showRawText) {
                             VStack(spacing: 12) {
                                 PoolDetailCard(
-                                    poolName: "角色卡池(特许寻访)",
+                                    poolName: "角色卡池 (特许寻访)",
                                     stats: a.statsChar,
                                     kind: .character
                                 )
                                 PoolDetailCard(
-                                    poolName: "武器卡池(武库申领)",
+                                    poolName: "角色卡池 (辉光庆典)",
+                                    stats: a.statsJoint,
+                                    kind: .joint
+                                )
+                                PoolDetailCard(
+                                    poolName: "武器卡池 (武库申领)",
                                     stats: a.statsWep,
                                     kind: .weapon
                                 )
@@ -73,14 +79,14 @@ struct AnalysisView_iOS: View {
                         .padding(.horizontal)
                         .padding(.vertical, 4)
 
-                        // 4 张图布局:
-                        //   iPad (regular): 2x2 网格,每行固定 360pt
-                        //                   (在 ScrollView 里必须固定高度,否则坍缩为 0)
-                        //   iPhone (compact): 纵向堆叠 4 张,每张 280pt
+                        // 6 张图布局 (v0.1.2.0, 从 4 张扩到 6 张):
+                        //   iPad (regular): 2x3 网格 (3 行 × 2 列, 每行一个池)
+                        //   iPhone (compact): 纵向堆叠 6 张
                         let layout: ChartGridLayout =
                             (hSize == .regular) ? .grid2x2Fixed : .vertical
-                        ChartGridView(statsChar: a.statsChar,
-                                      statsWep: a.statsWep,
+                        ChartGridView(statsChar:  a.statsChar,
+                                      statsJoint: a.statsJoint,
+                                      statsWep:   a.statsWep,
                                       layout: layout)
                             .padding(.horizontal)
                     } else {
@@ -181,47 +187,60 @@ private struct SummaryCardsView: View {
 
     var body: some View {
         // 用 Grid 而非 LazyVGrid:
-        //   只有 4 张卡片, lazy 加载没有意义。LazyVGrid 在 ScrollView 中
+        //   v0.1.2.0: 从 2x2 扩到 3x2, 加辉光庆典池摘要行.
+        //   只有 6 张卡片, lazy 加载没有意义。LazyVGrid 在 ScrollView 中
         //   遇到快速滚动/切 Tab 时, 某些 cell 会出现"内容为空但占位还在"的渲染 bug,
         //   尤其是 cell 用了 .regularMaterial 这种需要离屏采样的复杂背景。
         //   Grid 一次性渲染全部 cell,没有卸载/加载的状态切换,从源头消除该 bug。
         Grid(horizontalSpacing: 10, verticalSpacing: 10) {
             GridRow {
-                // 1. 角色总样本量 + 平均抽数(对应"角色 ECDF"图)
+                // 1. 特许角色总样本量 + 平均抽数
                 StatCard(
-                    title: "角色 · 总样本",
+                    title: "特许 · 总样本",
                     value: "\(charts.statsChar.count_all)",
                     subtitle: String(format: "平均 %.2f 抽 / 6★",
                                      charts.statsChar.avg_all)
                 )
-                // 2. 角色 50/50 不歪率(用户最关心:有没有被针对)
+                // 2. 特许角色 50/50 不歪率
                 StatCard(
-                    title: "角色 · 不歪率",
+                    title: "特许 · 不歪率",
                     value: rateString(charts.statsChar.win_rate_5050),
                     subtitle: "\(charts.statsChar.win_5050) 中 / \(charts.statsChar.win_5050 + charts.statsChar.lose_5050) 总"
                 )
             }
             GridRow {
-                // 3. 武器总样本(对应"武器 ECDF"图)
+                // 3. 辉光庆典池总样本 (v0.1.2.0)
+                StatCard(
+                    title: "辉光 · 总样本",
+                    value: "\(charts.statsJoint.count_all)",
+                    subtitle: String(format: "平均 %.2f 抽 / 6★",
+                                     charts.statsJoint.avg_all)
+                )
+                // 4. 辉光池非常驻六星率 (每个 6 星独立 50% 出限定, 跟武器池 UP 率同语义)
+                StatCard(
+                    title: "辉光 · 非常驻率",
+                    value: rateString(jointUpRate(charts.statsJoint)),
+                    subtitle: "\(charts.statsJoint.win_5050) 限定 / \(charts.statsJoint.win_5050 + charts.statsJoint.lose_5050) 总"
+                )
+            }
+            GridRow {
+                // 5. 武器总样本
                 StatCard(
                     title: "武器 · 总样本",
                     value: "\(charts.statsWep.count_all)",
                     subtitle: String(format: "平均 %.2f 抽 / 6★",
                                      charts.statsWep.avg_all)
                 )
-                // 4. KS 检验 (v0.1.1 起改用 UP):
+                // 6. 特许角色 UP K-S 正态性 (v0.1.1 起改用 UP):
                 //    UP 涉及 50% 歪率 + 各自硬保底, 比综合六星更复杂,
                 //    KS 偏离度更能反映"运气是否反常"。
                 //    综合六星机制本身简单(纯 hazard 函数), 偏离度本身信息量较少。
                 //    若 UP 数据为 0, 降级显示综合 6 星 KS。
                 //
-                //    标题与前三张卡 ("角色 · 总样本" / "角色 · 不歪率" /
-                //    "武器 · 总样本") 保持 "主体 · 指标" 命名格式对齐。
+                //    标题与其他卡片保持 "主体 · 指标" 命名格式对齐。
                 //    标题随数据源动态切换:
-                //      有 UP 数据 → "角色 · UP 正态性",副标题 "UP D = 0.xxx"
-                //      降级综合 → "角色 · 正态性",  副标题 "综合 D = 0.xxx"
-                //    这样标题和副标题始终在描述同一种数据,不会出现
-                //    "标题写 UP 但副标题写综合" 的语义错位。
+                //      有 UP 数据 → "特许 · UP 正态性",副标题 "UP D = 0.xxx"
+                //      降级综合 → "特许 · 正态性",  副标题 "综合 D = 0.xxx"
                 StatCard(
                     title: ksDisplayTitle(charts.statsChar),
                     value: ksDisplayValue(charts.statsChar),
@@ -232,11 +251,18 @@ private struct SummaryCardsView: View {
         }
     }
 
-    /// UP KS 标题: 与前三张卡 "主体 · 指标" 格式对齐。
-    /// 有 UP 数据时主体为 "角色 · UP 正态性",降级时为 "角色 · 正态性",
+    /// 辉光池非常驻六星率: count_up / count_all (跟武器池 UP 率同算法).
+    /// 没有"歪/不歪"概念, win_5050 直接 = count_up (限定数).
+    private func jointUpRate(_ s: ChartData) -> Double {
+        guard s.count_all > 0 else { return -1 }
+        return Double(s.count_up) / Double(s.count_all)
+    }
+
+    /// UP KS 标题: 与其他卡片 "主体 · 指标" 格式对齐。
+    /// 有 UP 数据时主体为 "特许 · UP 正态性",降级时为 "特许 · 正态性",
     /// 与下方 ksDisplaySubtitle 的 "UP D" / "综合 D" 始终保持一致。
     private func ksDisplayTitle(_ s: ChartData) -> String {
-        s.count_up > 0 ? "角色 · UP 正态性" : "角色 · 正态性"
+        s.count_up > 0 ? "特许 · UP 正态性" : "特许 · 正态性"
     }
 
     /// UP KS 主显示: 优先用 UP, 数据不足降级综合
@@ -309,8 +335,9 @@ private struct StatCard: View {
 //     中文字符仍走系统字体,避免 monospace 中文的丑陋渲染
 private struct PoolDetailCard: View {
     enum Kind {
-        case character  // 显示"真实不歪率"
-        case weapon     // 显示"6 星中 UP 率"
+        case character  // 特许寻访: 显示"真实不歪率"
+        case joint      // 辉光庆典: 显示"非常驻六星率" (v0.1.2.0)
+        case weapon     // 武库申领: 显示"6 星中 UP 率"
     }
 
     let poolName: String
@@ -318,10 +345,27 @@ private struct PoolDetailCard: View {
     let kind: Kind
 
     // 理论值常量(与 C++ 端格式串里的硬编码值一致)
-    // 来源: AnalyzerWrapper.mm 中 PrintReport 格式串
-    private var theoryAvgAll: Double { kind == .character ? 51.81 : 19.17 }
-    private var theoryAvgUp:  Double { kind == .character ? 74.33 : 81.66 }
-    private var theoryUpRate: Double { kind == .character ? 0.50  : 0.25  }
+    // 来源: AnalyzerWrapper.mm 中 FormatOutput 格式串
+    private var theoryAvgAll: Double {
+        switch kind {
+        case .character: return 51.81
+        case .joint:     return 51.81   // 辉光池综合 6 星与特许寻访同分布
+        case .weapon:    return 19.17
+        }
+    }
+    private var theoryAvgUp: Double {
+        switch kind {
+        case .character: return 74.33
+        case .joint:     return 103.62  // 辉光池首限定期望 (E[首6星]/0.5)
+        case .weapon:    return 81.66
+        }
+    }
+    private var theoryUpRate: Double {
+        switch kind {
+        case .character, .joint: return 0.50
+        case .weapon:            return 0.25
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -346,75 +390,116 @@ private struct PoolDetailCard: View {
             Divider()
 
             // ---- 数据行 ----
-            // 综合六星出货平均
+            // 综合六星出货均值: count_all=0 时 avg_all 是未定义的(0 是 sentinel,
+            // 不是"均值是 0 抽"). 用 "—" 占位; CV 和 95% CI 同理在零样本下未定义,
+            // hint 也精简到只剩理论值.
             DetailRow(
                 label: "综合六星出货均值",
-                value: String(format: "%.2f 抽", stats.avg_all),
-                hint: String(format: "理论 %.2f · CV %.1f%% · 95%% CI [%.1f, %.1f]",
+                value: stats.count_all > 0
+                    ? String(format: "%.2f 抽", stats.avg_all)
+                    : "—",
+                hint: stats.count_all > 0
+                    ? String(format: "理论 %.2f · CV %.1f%% · 95%% CI [%.1f, %.1f]",
                              theoryAvgAll,
                              stats.cv_all * 100,
                              max(0, stats.avg_all - stats.ci_all_err),
                              stats.avg_all + stats.ci_all_err)
+                    : String(format: "理论 %.2f", theoryAvgAll)
             )
 
-            // K-S 检验 (综合六星)
+            // K-S 检验 (综合六星): count_all=0 时 ks_d_all 未定义 (0 是 sentinel,
+            // 不是"D 偏离度是 0"). hint 描述 "符合理论模型" 也只在有样本时才有意义,
+            // 零样本下既无法计算 D 也无法判断符合/偏离, 全部用占位.
             DetailRow(
                 label: "综合六星 K-S 偏离度",
-                value: String(format: "D = %.3f", stats.ks_d_all),
-                hint: stats.ks_is_normal ? "符合理论模型" : "偏离理论模型",
-                valueTint: stats.ks_is_normal ? .primary : .orange
+                value: stats.count_all > 0
+                    ? String(format: "D = %.3f", stats.ks_d_all)
+                    : "—",
+                hint: stats.count_all > 0
+                    ? (stats.ks_is_normal ? "符合理论模型" : "偏离理论模型")
+                    : "样本不足, 无法判断",
+                valueTint: stats.count_all > 0
+                    ? (stats.ks_is_normal ? .primary : .orange)
+                    : .primary
             )
 
-            // 抽到 UP 平均
-            if stats.count_up > 0 {
-                DetailRow(
-                    label: "抽到 UP 综合均值",
-                    value: String(format: "%.2f 抽", stats.avg_up),
-                    hint: String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
-                                 theoryAvgUp,
-                                 max(0, stats.avg_up - stats.ci_up_err),
-                                 stats.avg_up + stats.ci_up_err)
-                )
+            // 抽到 UP / 限定 平均: 同上, count_up=0 时 avg_up 未定义.
+            // 辉光池没有"当期 UP"概念 (4 个 6 星里 2 限定 2 常驻),
+            // 文案改成"抽到限定(非常驻)均值"语义更准确.
+            DetailRow(
+                label: kind == .joint ? "抽到限定(非常驻)均值" : "抽到 UP 综合均值",
+                value: stats.count_up > 0
+                    ? String(format: "%.2f 抽", stats.avg_up)
+                    : "—",
+                hint: stats.count_up > 0
+                    ? String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
+                             theoryAvgUp,
+                             max(0, stats.avg_up - stats.ci_up_err),
+                             stats.avg_up + stats.ci_up_err)
+                    : String(format: "理论 %.2f", theoryAvgUp)
+            )
 
-                // K-S 检验 (UP 六星, v0.1.2 新增)
-                // 与综合六星 KS 行紧邻, 让用户能直接对比"机制大盘 vs 当期 UP"
-                // 是否各自符合理论模型。
-                DetailRow(
-                    label: "UP 六星 K-S 偏离度",
-                    value: String(format: "D = %.3f", stats.ks_d_up),
-                    hint: stats.ks_is_normal_up ? "符合理论模型" : "偏离理论模型",
-                    valueTint: stats.ks_is_normal_up ? .primary : .orange
-                )
-            }
+            // K-S 检验 (UP / 限定 六星): 与综合六星 KS 行紧邻,
+            // 用户能直接对比"机制大盘 vs 当期"是否各自符合理论模型.
+            // count_up=0 时 ks_d_up 未定义, 同样用占位.
+            DetailRow(
+                label: kind == .joint ? "限定六星 K-S 偏离度" : "UP 六星 K-S 偏离度",
+                value: stats.count_up > 0
+                    ? String(format: "D = %.3f", stats.ks_d_up)
+                    : "—",
+                hint: stats.count_up > 0
+                    ? (stats.ks_is_normal_up ? "符合理论模型" : "偏离理论模型")
+                    : "样本不足, 无法判断",
+                valueTint: stats.count_up > 0
+                    ? (stats.ks_is_normal_up ? .primary : .orange)
+                    : .primary
+            )
 
-            // 不歪率(角色) / 6 星 UP 率(武器)
+            // 不歪率(角色 特许) / 非常驻率(辉光) / 6 星 UP 率(武器)
             switch kind {
             case .character:
-                if stats.win_rate_5050 >= 0 {
-                    DetailRow(
-                        label: "真实不歪率",
-                        value: String(format: "%.1f%%", stats.win_rate_5050 * 100),
-                        hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) 胜 \(stats.lose_5050) 负"
-                    )
-                }
-                if stats.avg_win > 0 {
-                    DetailRow(
-                        label: "赢下小保底均值",
-                        value: String(format: "%.2f 抽", stats.avg_win),
-                        hint: nil
-                    )
-                }
+                // 无样本时 win_rate_5050 / avg_win 在 C++ 端为 sentinel -1,
+                // 显示占位符 "—" 而非负数, 保持检测项完整可见.
+                DetailRow(
+                    label: "真实不歪率",
+                    value: stats.win_rate_5050 >= 0
+                        ? String(format: "%.1f%%", stats.win_rate_5050 * 100)
+                        : "—",
+                    hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) 胜 \(stats.lose_5050) 负"
+                )
+                DetailRow(
+                    label: "赢下小保底均值",
+                    value: stats.avg_win > 0
+                        ? String(format: "%.2f 抽", stats.avg_win)
+                        : "—",
+                    hint: nil
+                )
+            case .joint:
+                // 辉光池没有"小保底/大保底"概念, 每个 6 星独立 50% 出限定.
+                // 显示"非常驻六星率"(限定 / 总 6 星), 跟武器池 UP 率同语义.
+                // 无样本时显示占位符 "—" 而非 0.0%, 与"真实不歪率"对齐.
+                let jointUpRate = stats.count_all > 0
+                    ? Double(stats.win_5050) / Double(stats.count_all)
+                    : 0
+                DetailRow(
+                    label: "非常驻六星率",
+                    value: stats.count_all > 0
+                        ? String(format: "%.1f%%", jointUpRate * 100)
+                        : "—",
+                    hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) 限定 / \(stats.lose_5050) 常驻"
+                )
             case .weapon:
+                // 无样本时显示占位符 "—", 与"真实不歪率" / 辉光"非常驻六星率"对齐.
                 let upRate = stats.count_all > 0
                     ? Double(stats.win_5050) / Double(stats.count_all)
                     : 0
-                if stats.count_up > 0 {
-                    DetailRow(
-                        label: "6 星 UP 率",
-                        value: String(format: "%.1f%%", upRate * 100),
-                        hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) UP / \(stats.lose_5050) 非 UP"
-                    )
-                }
+                DetailRow(
+                    label: "6 星 UP 率",
+                    value: stats.count_all > 0
+                        ? String(format: "%.1f%%", upRate * 100)
+                        : "—",
+                    hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) UP / \(stats.lose_5050) 非 UP"
+                )
             }
         }
         .padding(14)

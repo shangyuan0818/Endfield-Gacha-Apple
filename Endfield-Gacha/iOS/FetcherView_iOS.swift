@@ -171,6 +171,10 @@ struct FetcherView_iOS: View {
             }
             .navigationTitle("拉取数据")
             .navigationBarTitleDisplayMode(.inline)
+            // TextEditor 默认不响应"点击外部收起键盘". 在 Form 上加
+            // scrollDismissesKeyboard, 用户向下滑动列表时键盘跟着收起 (iOS
+            // 系统级标准交互, 与短信/邮件 App 一致).
+            .scrollDismissesKeyboard(.interactively)
             // 选择基底文件
             .fileImporter(
                 isPresented: $showBaseImporter,

@@ -59,6 +59,10 @@ struct SettingsView_iOS: View {
                         .font(.footnote)
                 }
             }
+            // TextEditor 默认不响应"点击外部收起键盘". 在 Form 上加
+            // scrollDismissesKeyboard, 用户向下滑动列表时键盘跟着收起 (iOS
+            // 系统级标准交互, 与短信/邮件 App 一致).
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.large)
             // 切走时落盘

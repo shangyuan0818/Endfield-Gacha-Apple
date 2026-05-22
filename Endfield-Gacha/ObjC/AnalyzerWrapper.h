@@ -36,9 +36,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (double)hazardAllAt:(NSInteger)index;
 - (double)hazardUpAt:(NSInteger)index;
 
-// 批量拷贝接口：Swift 用 UnsafeMutableBufferPointer 一次拿全 150 个值，
-// 比 600 次 ObjC msgSend 快两个数量级。
-// dst 必须至少有 150 个元素的容量。
+// 批量拷贝接口：Swift 用 UnsafeMutableBufferPointer 一次拿全 260 个值，
+// 比 1040 次 ObjC msgSend 快两个数量级。
+// dst 必须至少有 260 个元素的容量。
+// v0.1.2.0: 数组从 150 扩到 260, 容纳辉光池 0..240 的 pity 范围.
 - (void)copyFreqAllInto:(int * _Nonnull)dst;
 - (void)copyFreqUpInto:(int * _Nonnull)dst;
 - (void)copyHazardAllInto:(double * _Nonnull)dst;
@@ -50,6 +51,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) NSString* textOutput;
 @property (nonatomic, strong, nullable) GachaChartData* statsChar;
 @property (nonatomic, strong, nullable) GachaChartData* statsWep;
+// v0.1.2.0: 辉光庆典池数据
+@property (nonatomic, strong, nullable) GachaChartData* statsJoint;
 @property (nonatomic) BOOL ok;
 @end
 

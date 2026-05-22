@@ -101,8 +101,13 @@ private struct TheoryCDF {
     }()
 
     // ===== 角色当期 UP =====
-    // 双状态前向迭代 (docs §2.1.2): 每抽出货后 50% 毕业 / 50% 重置水位
-    // 第 120 抽硬保底强制毕业。不计入 30 抽 bonus 提前毕业。
+    // v0.1.1.1: 升级为真实双状态前向迭代 D[h][s]
+    //   h ∈ {0, 1}: 是否处于大保底 (0=未触发, 1=已触发, 下次出 6 星必 UP)
+    //   s ∈ [0, 80): 当前水位
+    //   n=30 处展开 11 次免费十连判定 (1 本体抽 + 10 免费抽水位停)
+    //   第 120 抽硬保底强制全部毕业
+    // 旧版 v0.1.1 用单维 D[s] + p_hit * 0.5 简化, E[首UP] ≈ 81.4 (偏差 7 抽);
+    // v0.1.1.1 改真实双状态, E[首UP] ≈ 74.16, 与社区数据 74.33 对齐.
     static let charPoolUP: [Double] = {
         let hardCap = 120
         let maxSoftPity = 80
@@ -114,33 +119,76 @@ private struct TheoryCDF {
             else             { return 1.0 }
         }
 
-        var D = [Double](repeating: 0, count: maxSoftPity)
-        D[0] = 1.0
+        // D[h][s]: h=0/1 是否触发大保底; s 是水位
+        var D = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
+                           count: 2)
+        D[0][0] = 1.0
         var cum = 0.0
+
+        // 一抽: src → dst, 累加毕业概率 p_finish, waterStops 决定不出货时水位停 vs 推进
+        func stepOnePull(src: [[Double]], dst: inout [[Double]],
+                         pFinish: inout Double, waterStops: Bool) {
+            for hh in 0..<2 {
+                for s in 0..<maxSoftPity where src[hh][s] > 0 {
+                    let prob = src[hh][s]
+                    let ph = h(s + 1)
+                    // 不出 6 星: 水位推进 (或停)
+                    if waterStops {
+                        dst[hh][s] += prob * (1 - ph)
+                    } else if s + 1 < maxSoftPity {
+                        dst[hh][s + 1] += prob * (1 - ph)
+                    }
+                    // 出 6 星
+                    if hh == 1 {
+                        // 大保底: 必 UP, 毕业
+                        pFinish += prob * ph
+                    } else {
+                        // 非大保底: 50% UP 毕业, 50% 非 UP 进入大保底
+                        pFinish += prob * ph * 0.5
+                        if waterStops {
+                            dst[1][s] += prob * ph * 0.5
+                        } else {
+                            dst[1][0] += prob * ph * 0.5
+                        }
+                    }
+                }
+            }
+        }
 
         for n in 1...hardCap {
             if n == hardCap {
-                let alive = D.reduce(0, +)
+                // 120 硬保底: 所有未毕业概率强制毕业
+                let alive = D.flatMap { $0 }.reduce(0, +)
                 cum += alive
                 cdf[n] = min(1.0, cum)
-                for k in (n+1)...(hardCap + 1) { cdf[k] = 1.0 }
+                for k in (n + 1)...(hardCap + 1) { cdf[k] = 1.0 }
                 break
             }
-            var newD = [Double](repeating: 0, count: maxSoftPity)
-            var pHit = 0.0
-            for s in 0..<maxSoftPity where D[s] > 0 {
-                let prob = D[s]
-                let ph = h(s + 1)
-                pHit += prob * ph
-                if s + 1 < maxSoftPity {
-                    newD[s + 1] += prob * (1 - ph)
+
+            if n == 30 {
+                // 1 本体抽 + 10 免费抽
+                var stateA = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
+                                        count: 2)
+                var pFinish = 0.0
+                stepOnePull(src: D, dst: &stateA, pFinish: &pFinish, waterStops: false)
+                for _ in 0..<10 {
+                    var stateB = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
+                                            count: 2)
+                    stepOnePull(src: stateA, dst: &stateB, pFinish: &pFinish, waterStops: true)
+                    stateA = stateB
                 }
+                cum += pFinish
+                cdf[n] = min(1.0, cum)
+                D = stateA
+            } else {
+                var newD = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
+                                      count: 2)
+                var pFinish = 0.0
+                stepOnePull(src: D, dst: &newD, pFinish: &pFinish, waterStops: false)
+                cum += pFinish
+                cdf[n] = min(1.0, cum)
+                D = newD
             }
-            let pFinish = pHit * 0.5
-            cum += pFinish
-            cdf[n] = min(1.0, cum)
-            newD[0] += pHit * 0.5
-            D = newD
         }
         return cdf
     }()
@@ -198,11 +246,142 @@ private struct TheoryCDF {
         }
         return cdf
     }()
+
+    // ===== 辉光庆典 UP (v0.1.2.4) =====
+    //
+    // 与 Special 池机制差异:
+    //   (1) 4 个 6 星均匀分布: 2 限定 + 2 常驻, P(限定|六星) = 50%
+    //   (2) 没有"大保底"——歪了下一次不保证是限定
+    //   (3) 没有 120 抽 UP 硬保底
+    //   (4) n=30 处赠送 10 次免费十连 (水位停)
+    //
+    // 等价模型: 重复独立"出 6 星"周期, 每周期 50% 出限定 (即停止).
+    // 完整理论期望: E[首限定] ≈ 104.68 抽.
+    //
+    // CDF 截到 X=240 (与图表 X 轴一致, 数组 [0..240]).
+    // CDF[240] ≈ 0.93, 长尾 ~7% 用 jointTailMeanExcess 单点近似补回 MRL.
+    static let jointPoolUP: [Double] = {
+        let maxSoft = 80
+        let maxN    = 240
+        func h(_ k: Int) -> Double {
+            if k <= 65       { return 0.008 }
+            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
+            else             { return 1.0 }
+        }
+        var cdf = [Double](repeating: 0, count: maxN + 2)
+        var D = [Double](repeating: 0, count: maxSoft)
+        D[0] = 1.0
+        var cum = 0.0
+
+        for n in 1...maxN {
+            var newD = [Double](repeating: 0, count: maxSoft)
+            var pHitGrad = 0.0
+
+            if n == 30 {
+                // 1 本体抽 + 10 免费十连 (水位停)
+                var stateA = [Double](repeating: 0, count: maxSoft)
+                for s in 0..<maxSoft where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoft { stateA[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad   += D[s] * ph * 0.5
+                    stateA[0]  += D[s] * ph * 0.5
+                }
+                for _ in 0..<10 {
+                    var newStateA = [Double](repeating: 0, count: maxSoft)
+                    for s in 0..<maxSoft where stateA[s] > 0 {
+                        let ph = h(s + 1)
+                        newStateA[s] += stateA[s] * (1 - ph)
+                        pHitGrad     += stateA[s] * ph * 0.5
+                        newStateA[s] += stateA[s] * ph * 0.5
+                    }
+                    stateA = newStateA
+                }
+                newD = stateA
+            } else {
+                for s in 0..<maxSoft where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoft { newD[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad += D[s] * ph * 0.5
+                    newD[0]  += D[s] * ph * 0.5
+                }
+            }
+            cum += pHitGrad
+            cdf[n] = min(1.0, cum)
+            D = newD
+        }
+        return cdf
+    }()
+
+    // jointTailMeanExcess = E[首限定 | 首限定 > 240] - 240 ≈ 84.37
+    //
+    // 数学动机: 辉光池 CDF[240] ≈ 0.93, 截断丢掉 ~7% 长尾质量, 直接算 MRL[0]
+    // 会从真值 ~104.68 跌到 ~82. 用单点近似 (位置 240+84.37, 质量 1-cdf[240])
+    // 补回 MRL[t] += (240 + tail_mean_excess - t) × (1 - cdf[240]).
+    //
+    // 与 Windows / ObjC 端 v0.1.2.4 实现完全一致: 临时跑 simulate 到 n=2000
+    // 累加尾部 Σ k·pdf[k] / Σ pdf[k]. 动态计算保证未来机制改动自动跟上.
+    static let jointTailMeanExcess: Double = {
+        let maxSoft = 80
+        let maxN    = 240
+        let tailSimN = 2000
+        func h(_ k: Int) -> Double {
+            if k <= 65       { return 0.008 }
+            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
+            else             { return 1.0 }
+        }
+        var D = [Double](repeating: 0, count: maxSoft)
+        D[0] = 1.0
+        var tailSumKPdf = 0.0
+        var tailMass    = 0.0
+
+        for n in 1...tailSimN {
+            var newD = [Double](repeating: 0, count: maxSoft)
+            var pHitGrad = 0.0
+
+            if n == 30 {
+                var stateA = [Double](repeating: 0, count: maxSoft)
+                for s in 0..<maxSoft where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoft { stateA[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad  += D[s] * ph * 0.5
+                    stateA[0] += D[s] * ph * 0.5
+                }
+                for _ in 0..<10 {
+                    var newStateA = [Double](repeating: 0, count: maxSoft)
+                    for s in 0..<maxSoft where stateA[s] > 0 {
+                        let ph = h(s + 1)
+                        newStateA[s] += stateA[s] * (1 - ph)
+                        pHitGrad     += stateA[s] * ph * 0.5
+                        newStateA[s] += stateA[s] * ph * 0.5
+                    }
+                    stateA = newStateA
+                }
+                newD = stateA
+            } else {
+                for s in 0..<maxSoft where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoft { newD[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad += D[s] * ph * 0.5
+                    newD[0]  += D[s] * ph * 0.5
+                }
+            }
+
+            let pdfN = pHitGrad
+            if n > maxN {
+                tailSumKPdf += Double(n) * pdfN
+                tailMass    += pdfN
+            }
+            D = newD
+        }
+        guard tailMass > 1e-12 else { return 0.0 }
+        return tailSumKPdf / tailMass - Double(maxN)
+    }()
 }
 
 struct ChartGridView: View {
-    let statsChar: ChartData
-    let statsWep:  ChartData
+    let statsChar:  ChartData
+    let statsJoint: ChartData   // v0.1.2.0: 辉光庆典池
+    let statsWep:   ChartData
     var layout: ChartGridLayout = .grid2x2
 
     var body: some View {
@@ -216,7 +395,7 @@ struct ChartGridView: View {
         }
     }
 
-    // macOS / iPad: 2x2 网格
+    // macOS / iPad: 2x3 网格 (3 行 × 2 列, 每行一个池子: 特许/辉光/武器)
     //
     // 高度策略:
     //   - macOS: 外层 ZStack 撑满窗口,内容自适应。
@@ -227,28 +406,35 @@ struct ChartGridView: View {
                 charECDF
                 charMRL
             }
-            .frame(height: useFixedHeight ? 360 : nil)
+            .frame(height: useFixedHeight ? 280 : nil)
+            HStack(spacing: 12) {
+                jointECDF
+                jointMRL
+            }
+            .frame(height: useFixedHeight ? 280 : nil)
             HStack(spacing: 12) {
                 wepECDF
                 wepMRL
             }
-            .frame(height: useFixedHeight ? 360 : nil)
+            .frame(height: useFixedHeight ? 280 : nil)
         }
     }
 
-    // iPhone: 纵向 4 张依次堆叠,每张固定高度
+    // iPhone: 纵向 6 张依次堆叠 (3 个池 × 2 图), 每张固定高度
     private var verticalLayout: some View {
         VStack(spacing: 12) {
-            charECDF.frame(height: 280)
-            charMRL.frame(height: 280)
-            wepECDF.frame(height: 280)
-            wepMRL.frame(height: 280)
+            charECDF.frame(height: 260)
+            charMRL.frame(height: 260)
+            jointECDF.frame(height: 260)
+            jointMRL.frame(height: 260)
+            wepECDF.frame(height: 260)
+            wepMRL.frame(height: 260)
         }
     }
 
-    // MARK: 4 张图的具体配置(只写一次,两种布局共用)
+    // MARK: 6 张图的具体配置(只写一次,两种布局共用)
     private var charECDF: some View {
-        ECDFCanvas(title: "角色累积分布 (ECDF)",
+        ECDFCanvas(title: "角色 (特许寻访) 累积分布 (ECDF)",
                    freq_all: statsChar.freq_all, freq_up: statsChar.freq_up,
                    count_all: statsChar.count_all, count_up: statsChar.count_up,
                    censored_all: statsChar.censored_pity_all,
@@ -259,7 +445,7 @@ struct ChartGridView: View {
                    ecdfUpStepSize: 1)
     }
     private var charMRL: some View {
-        MRLCanvas(title: "角色剩余抽数期望 (MRL)",
+        MRLCanvas(title: "角色 (特许寻访) 剩余抽数期望 (MRL)",
                   freq_all: statsChar.freq_all, freq_up: statsChar.freq_up,
                   count_all: statsChar.count_all, count_up: statsChar.count_up,
                   censored_all: statsChar.censored_pity_all,
@@ -268,6 +454,31 @@ struct ChartGridView: View {
                   theoryCDFUp: TheoryCDF.charPoolUP,
                   limitBase: 120,
                   theoryAllCap: 80, theoryUpCap: 120)
+    }
+    // v0.1.2.0/4: 辉光庆典池图表. ECDF 红线只画到 X=240 (CDF 在此处 ~0.93,
+    // 长尾质量通过 tailMeanExcessUp 在 MRL 计算中补回).
+    private var jointECDF: some View {
+        ECDFCanvas(title: "角色 (辉光庆典) 累积分布 (ECDF)",
+                   freq_all: statsJoint.freq_all, freq_up: statsJoint.freq_up,
+                   count_all: statsJoint.count_all, count_up: statsJoint.count_up,
+                   censored_all: statsJoint.censored_pity_all,
+                   censored_up:  statsJoint.censored_pity_up,
+                   theoryCDF: TheoryCDF.charPool,
+                   theoryCDFUp: TheoryCDF.jointPoolUP,
+                   limitBase: 240,
+                   ecdfUpStepSize: 1)
+    }
+    private var jointMRL: some View {
+        MRLCanvas(title: "角色 (辉光庆典) 剩余抽数期望 (MRL)",
+                  freq_all: statsJoint.freq_all, freq_up: statsJoint.freq_up,
+                  count_all: statsJoint.count_all, count_up: statsJoint.count_up,
+                  censored_all: statsJoint.censored_pity_all,
+                  censored_up:  statsJoint.censored_pity_up,
+                  theoryCDF: TheoryCDF.charPool,
+                  theoryCDFUp: TheoryCDF.jointPoolUP,
+                  limitBase: 240,
+                  theoryAllCap: 80, theoryUpCap: 240,
+                  tailMeanExcessUp: TheoryCDF.jointTailMeanExcess)
     }
     private var wepECDF: some View {
         ECDFCanvas(title: "武器累积分布 (ECDF)",
@@ -365,20 +576,18 @@ struct ECDFCanvas: View {
     }
 
     private func draw(ctx: inout GraphicsContext, size: CGSize) {
-        guard freq_all.count >= 150, freq_up.count >= 150 else { return }
+        guard freq_all.count >= 260, freq_up.count >= 260 else { return }
         let hasData = (count_all > 0) || (count_up > 0)
-        if !hasData {
-            let txt = Text("暂无出金数据").font(.system(size: 13)).foregroundStyle(.secondary)
-            drawText(&ctx, txt, at: CGPoint(x: size.width / 2, y: size.height / 2))
-            return
-        }
+        // v0.1.2.1: 无数据时不直接 return, 继续画坐标轴 + 理论 CDF,
+        // 末尾叠加灰色提示. 让用户在导入 UIGF JSON 但还没出金时也能
+        // 看到理论参考曲线, 而不是一片空白.
 
         var maxX = limitBase
-        for i in 1..<150 {
+        for i in 1..<260 {
             if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
         }
         maxX = ((maxX / 10) + 1) * 10
-        if maxX > 149 { maxX = 149 }
+        if maxX > 259 { maxX = 259 }
 
         let plotX: CGFloat = 50
         let plotY: CGFloat = 16
@@ -444,13 +653,28 @@ struct ECDFCanvas: View {
         func drawTheoryCDF(_ cdf: [Double], stepSize: Int, color: Color) {
             let upper = min(cdf.count - 1, maxX)
             guard upper >= 1 else { return }
+            // v0.1.2.2: 与 Windows gui.cpp drawTheoryCDF 同款 upper_eff 截断, 截掉两类"伪末端":
+            //   1) 已饱和段: 找到第一个 cdf[k] >= 1-eps 的 k_sat, 之后所有 cdf 都等于 1.0
+            //      (硬保底之后的延伸 + char_up 122 个槽里 cdf[120]=cdf[121]=1 的哨兵区);
+            //      画到 k_sat 就停, 否则末端会冒出一段 1→1 水平虚线 (即"垂直阶梯顶端向右
+            //      拐弯"的视觉 bug).
+            //   2) 未填充哨兵段: 辉光庆典 jointPoolUP[241]=0 (cdf 数组容量 242 但只填到 240),
+            //      画上去会从 0.93 跳到 0, 产生"红色理论虚线末端笔直掉下来"的视觉 bug.
+            //      检测到 cdf[k] < cdf[k-1] (单调性破坏) 也立即停.
+            let EPS_SAT = 1e-6
+            var upperEff = upper
+            for k in 1...upper {
+                if cdf[k] >= 1.0 - EPS_SAT { upperEff = k; break }
+                if cdf[k] + EPS_SAT < cdf[k - 1] { upperEff = k - 1; break }
+            }
+            guard upperEff >= 1 else { return }
             var path = Path()
             path.move(to: pt(0, cdf[0]))
             if stepSize == 1 {
                 let JUMP_THRESHOLD = 5.0
                 let MIN_PREV_DELTA = 1e-6
                 var inStepMode = false
-                for k in 1...upper {
+                for k in 1...upperEff {
                     let curDelta  = cdf[k] - cdf[k-1]
                     let prevDelta = (k >= 2) ? cdf[k-1] - cdf[k-2] : 0.0
                     var drawAsStep: Bool
@@ -482,13 +706,13 @@ struct ECDFCanvas: View {
                 }
             } else {
                 var k = stepSize
-                while k <= upper {
+                while k <= upperEff {
                     path.addLine(to: pt(k, cdf[k - stepSize]))
                     path.addLine(to: pt(k, cdf[k]))
                     k += stepSize
                 }
-                if k - stepSize < upper {
-                    path.addLine(to: pt(upper, cdf[k - stepSize]))
+                if k - stepSize < upperEff {
+                    path.addLine(to: pt(upperEff, cdf[k - stepSize]))
                 }
             }
             ctx.stroke(path, with: .color(color.opacity(0.55)),
@@ -535,10 +759,20 @@ struct ECDFCanvas: View {
             guard total > 0, theoryCDF.count >= 2 else { return }
             let upper = min(theoryCDF.count - 1, maxX)
             guard upper >= 1 else { return }
+            // v0.1.2.2: 同 drawTheoryCDF, 加 upper_eff 截断避免:
+            //   - 辉光池 theoryCDF[241]=0 让 |cum - 0| ≈ 1, 误判为最大偏离点
+            //   - 饱和段 (cdf[k]==1 after hard pity) 上做无意义的比较
+            let EPS_SAT = 1e-6
+            var upperEff = upper
+            for k in 1...upper {
+                if theoryCDF[k] >= 1.0 - EPS_SAT { upperEff = k; break }
+                if theoryCDF[k] + EPS_SAT < theoryCDF[k - 1] { upperEff = k - 1; break }
+            }
+            guard upperEff >= 1 else { return }
             var maxD = 0.0
             var maxDx = 0
             var cum = 0.0
-            for k in 1...upper {
+            for k in 1...upperEff {
                 cum += Double(freq[k]) / Double(total)
                 let d = abs(cum - theoryCDF[k])
                 if d > maxD { maxD = d; maxDx = k }
@@ -594,6 +828,14 @@ struct ECDFCanvas: View {
         drawKSMarker(freq: freq_up, total: count_up,
                      theoryCDF: theoryCDFUp, color: .chartRed,
                      anchor: .rightBottom)
+
+        // v0.1.2.1: 无出金数据时, 在图中央叠加灰色提示文字 (理论曲线仍可见)
+        if !hasData {
+            let txt = Text("暂无出金数据 (仅显示理论曲线参考)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            drawText(&ctx, txt, at: CGPoint(x: plotX + plotW / 2, y: plotY + plotH / 2))
+        }
     }
 }
 
@@ -611,6 +853,12 @@ struct MRLCanvas: View {
     let limitBase: Int
     let theoryAllCap: Int
     let theoryUpCap:  Int
+    /// v0.1.2.4: 仅辉光池非 0. 见 ChartGridView jointMRL 配置.
+    ///   含义: 在 UP 理论 CDF 截断点 (upper_eff) 之后追加一个点质量,
+    ///   位置 = upper_eff + tailMeanExcessUp, 质量 = 1 - cdf[upper_eff].
+    ///   公式: num += (位置 - t) × 质量, 让辉光池 MRL[0] 从无延伸的
+    ///   ~82 修正回完整真值 ~104.68.
+    var tailMeanExcessUp: Double = 0.0
 
     @Environment(\.horizontalSizeClass) private var hSize
 
@@ -658,8 +906,8 @@ struct MRLCanvas: View {
     }
 
     private func computeEmpiricalMRL(freq: [Int32], total: Int, maxX: Int) -> (mrl: [Double], surv: [Int]) {
-        var mrl = [Double](repeating: -1.0, count: 150)
-        var surv = [Int](repeating: 0, count: 150)
+        var mrl = [Double](repeating: -1.0, count: 260)
+        var surv = [Int](repeating: 0, count: 260)
         guard total > 0 else { return (mrl, surv) }
         var sufCount = 0
         var sufWeighted = 0
@@ -678,17 +926,45 @@ struct MRLCanvas: View {
         return (mrl, surv)
     }
 
-    private func computeTheoryMRL(cdf: [Double], maxX: Int) -> [Double] {
-        var tmrl = [Double](repeating: -1.0, count: 150)
+    // v0.1.2.2 / v0.1.2.4: 加 upper_eff 截断 (避免饱和/未填段) + 长尾点质量延伸.
+    //
+    //   upper_eff:  扫描 cdf 找饱和点 (>= 1-eps) 或单调性破坏点. 在那里停, 避免:
+    //     1) cdf[k]==1 后继续算无意义
+    //     2) 未填充末端 (辉光池删哨兵后 cdf[241]=0) 算 pdf=cdf[k]-cdf[k-1] 出负值
+    //
+    //   长尾点质量 (仅 tailMeanExcess > 0 时启用):
+    //     mass = 1 - cdf[upper_eff]
+    //     pos  = upper_eff + tailMeanExcess
+    //     公式: num += (pos - t) × mass
+    //     辉光池 MRL[0] 从 ~82 修正回完整真值 ~104.68.
+    private func computeTheoryMRL(cdf: [Double], maxX: Int,
+                                  tailMeanExcess: Double = 0.0) -> [Double] {
+        var tmrl = [Double](repeating: -1.0, count: 260)
         guard cdf.count >= 2 else { return tmrl }
         let upper = cdf.count - 1
-        for t in 0...min(upper - 1, maxX) {
+        // upper_eff 截断
+        let EPS_SAT = 1e-6
+        var upperEff = upper
+        for k in 1...upper {
+            if cdf[k] >= 1.0 - EPS_SAT { upperEff = k; break }
+            if cdf[k] + EPS_SAT < cdf[k - 1] { upperEff = k - 1; break }
+        }
+        guard upperEff >= 1 else { return tmrl }
+
+        let tailMass     = 1.0 - cdf[upperEff]
+        let tailPosition = Double(upperEff) + tailMeanExcess
+        let hasTail = (tailMeanExcess > 0.0) && (tailMass > 1e-9)
+
+        for t in 0...min(upperEff - 1, maxX) {
             let surv_t = 1.0 - cdf[t]
             if surv_t < 1e-9 { break }
             var num = 0.0
-            for k in (t + 1)...upper {
+            for k in (t + 1)...upperEff {
                 let pdf_k = cdf[k] - cdf[k-1]
                 num += Double(k - t) * pdf_k
+            }
+            if hasTail {
+                num += (tailPosition - Double(t)) * tailMass
             }
             tmrl[t] = num / surv_t
         }
@@ -696,25 +972,24 @@ struct MRLCanvas: View {
     }
 
     private func draw(ctx: inout GraphicsContext, size: CGSize) {
-        guard freq_all.count >= 150, freq_up.count >= 150 else { return }
+        guard freq_all.count >= 260, freq_up.count >= 260 else { return }
         let hasData = (count_all > 0) || (count_up > 0)
-        if !hasData {
-            let txt = Text("暂无出金数据").font(.system(size: 13)).foregroundStyle(.secondary)
-            drawText(&ctx, txt, at: CGPoint(x: size.width / 2, y: size.height / 2))
-            return
-        }
+        // v0.1.2.1: 无数据时不直接 return, 继续画坐标轴 + 理论曲线,
+        // 末尾叠加灰色提示.
 
         var maxX = limitBase
-        for i in 1..<150 {
+        for i in 1..<260 {
             if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
         }
         maxX = ((maxX / 10) + 1) * 10
-        if maxX > 149 { maxX = 149 }
+        if maxX > 259 { maxX = 259 }
 
         let mrlAll = computeEmpiricalMRL(freq: freq_all, total: count_all, maxX: maxX)
         let mrlUp  = computeEmpiricalMRL(freq: freq_up,  total: count_up,  maxX: maxX)
         let theoryMRL   = computeTheoryMRL(cdf: theoryCDF,   maxX: maxX)
-        let theoryMRLUp = computeTheoryMRL(cdf: theoryCDFUp, maxX: maxX)
+        // v0.1.2.4: UP 理论 MRL 用 tailMeanExcessUp 补长尾 (仅辉光池非 0)
+        let theoryMRLUp = computeTheoryMRL(cdf: theoryCDFUp, maxX: maxX,
+                                           tailMeanExcess: tailMeanExcessUp)
 
         var maxY = 1.0
         for t in 0...maxX {
@@ -915,6 +1190,14 @@ struct MRLCanvas: View {
             // 主文本
             let main = lbl.foregroundStyle(entry.color)
             drawText(&ctx, main, at: pos, anchor: .topTrailing)
+        }
+
+        // v0.1.2.1: 无出金数据时, 在图中央叠加灰色提示文字 (理论曲线仍可见)
+        if !hasData {
+            let txt = Text("暂无出金数据 (仅显示理论曲线参考)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            drawText(&ctx, txt, at: CGPoint(x: plotX + plotW / 2, y: plotY + plotH / 2))
         }
     }
 }

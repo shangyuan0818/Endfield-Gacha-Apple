@@ -39,29 +39,29 @@
 
 @implementation GachaChartData {
     // 内存安全密封在实例内部
-    int    _freqAll[150];
-    int    _freqUp[150];
-    double _hazardAll[150];
-    double _hazardUp[150];
+    int    _freqAll[260];
+    int    _freqUp[260];
+    double _hazardAll[260];
+    double _hazardUp[260];
 }
 
 // ---- 单点查询接口 (保留向后兼容) ----
-- (int)freqAllAt:(NSInteger)index    { return ((NSUInteger)index < 150) ? _freqAll[index]    : 0; }
-- (int)freqUpAt:(NSInteger)index     { return ((NSUInteger)index < 150) ? _freqUp[index]     : 0; }
-- (double)hazardAllAt:(NSInteger)index { return ((NSUInteger)index < 150) ? _hazardAll[index] : 0.0; }
-- (double)hazardUpAt:(NSInteger)index  { return ((NSUInteger)index < 150) ? _hazardUp[index]  : 0.0; }
+- (int)freqAllAt:(NSInteger)index    { return ((NSUInteger)index < 260) ? _freqAll[index]    : 0; }
+- (int)freqUpAt:(NSInteger)index     { return ((NSUInteger)index < 260) ? _freqUp[index]     : 0; }
+- (double)hazardAllAt:(NSInteger)index { return ((NSUInteger)index < 260) ? _hazardAll[index] : 0.0; }
+- (double)hazardUpAt:(NSInteger)index  { return ((NSUInteger)index < 260) ? _hazardUp[index]  : 0.0; }
 
-// ---- 批量拷贝接口 (Swift 一次 memcpy 拿全 150 个值) ----
-- (void)copyFreqAllInto:(int*)dst    { memcpy(dst, _freqAll,    150 * sizeof(int));    }
-- (void)copyFreqUpInto:(int*)dst     { memcpy(dst, _freqUp,     150 * sizeof(int));    }
-- (void)copyHazardAllInto:(double*)dst { memcpy(dst, _hazardAll, 150 * sizeof(double)); }
-- (void)copyHazardUpInto:(double*)dst  { memcpy(dst, _hazardUp,  150 * sizeof(double)); }
+// ---- 批量拷贝接口 (Swift 一次 memcpy 拿全 260 个值) ----
+- (void)copyFreqAllInto:(int*)dst    { memcpy(dst, _freqAll,    260 * sizeof(int));    }
+- (void)copyFreqUpInto:(int*)dst     { memcpy(dst, _freqUp,     260 * sizeof(int));    }
+- (void)copyHazardAllInto:(double*)dst { memcpy(dst, _hazardAll, 260 * sizeof(double)); }
+- (void)copyHazardUpInto:(double*)dst  { memcpy(dst, _hazardUp,  260 * sizeof(double)); }
 
 // ---- C++ 灌入数据接口 ----
-- (void)populateFreqAll:(const int*)arr     { memcpy(_freqAll,    arr, 150 * sizeof(int));    }
-- (void)populateFreqUp:(const int*)arr      { memcpy(_freqUp,     arr, 150 * sizeof(int));    }
-- (void)populateHazardAll:(const double*)arr { memcpy(_hazardAll, arr, 150 * sizeof(double)); }
-- (void)populateHazardUp:(const double*)arr  { memcpy(_hazardUp,  arr, 150 * sizeof(double)); }
+- (void)populateFreqAll:(const int*)arr     { memcpy(_freqAll,    arr, 260 * sizeof(int));    }
+- (void)populateFreqUp:(const int*)arr      { memcpy(_freqUp,     arr, 260 * sizeof(int));    }
+- (void)populateHazardAll:(const double*)arr { memcpy(_hazardAll, arr, 260 * sizeof(double)); }
+- (void)populateHazardUp:(const double*)arr  { memcpy(_hazardUp,  arr, 260 * sizeof(double)); }
 @end
 
 @implementation GachaAnalysisResult
@@ -76,7 +76,7 @@ namespace {
 // ------ 枚举 ------
 enum class ItemType  : uint8_t { Unknown = 0, Character, Weapon };
 enum class RankType  : uint8_t { Unknown = 0, Rank3=3, Rank4=4, Rank5=5, Rank6=6 };
-enum class GachaType : uint8_t { Unknown = 0, Beginner, Standard, Special, Constant };
+enum class GachaType : uint8_t { Unknown = 0, Beginner, Standard, Special, Constant, Joint };
 
 inline bool ContainsCI(std::string_view hay, std::string_view needle) {
     if (needle.empty() || needle.size() > hay.size()) return false;
@@ -109,6 +109,7 @@ inline GachaType ParseGachaType(std::string_view sv) {
     if (ContainsCI(sv,"beginner")) return GachaType::Beginner;
     if (ContainsCI(sv,"standard")) return GachaType::Standard;
     if (ContainsCI(sv,"constant")) return GachaType::Constant;
+    if (ContainsCI(sv,"joint"))    return GachaType::Joint;   // v0.1.2.0: 辉光庆典
     return GachaType::Unknown;
 }
 
@@ -241,7 +242,7 @@ struct PullBucket {
 
 // ------ StatsAccumulator (cache-line 对齐,避免与其他热数据共享 cacheline) ------
 struct alignas(128) StatsAccumulator {
-    std::array<int,150> freq_all{}, freq_up{};
+    std::array<int,260> freq_all{}, freq_up{};
     long long sum_all=0, sum_sq_all=0, sum_up=0, sum_sq_up=0, sum_win=0;
     int count_all=0, count_up=0, count_win=0, max_pity_all=0, max_pity_up=0;
     int win_5050=0, lose_5050=0, censored_pity_all=0, censored_pity_up=0;
@@ -249,13 +250,22 @@ struct alignas(128) StatsAccumulator {
 
 // ------ CDF 表 ------
 // 综合 6 星: g_cdf_char[0..80] / g_cdf_wep[0..40]
-// UP (v0.1.2 新增): g_cdf_char_up[0..120] / g_cdf_wep_up[0..80]
+// UP (v0.1.1 新增): g_cdf_char_up[0..120] / g_cdf_wep_up[0..80]
 //   角色 UP: 双状态前向迭代 (docs §2.1.2), 第 120 抽硬保底
 //   武器 UP: 4×8 状态机 (Reddit Step 4), 第 80 抽 featured 硬保底
-double g_cdf_char[82]    = {};
-double g_cdf_wep[41]     = {};
+// 辉光庆典 UP (v0.1.2.4):
+//   g_cdf_joint_up[0..240] + g_joint_tail_mean_excess 长尾解析延伸.
+//   池子: 4 个 6 星均匀 (2 限定 + 2 常驻), 无大保底, 无 UP 硬保底.
+//   CDF 在 X=240 处 ≈ 0.93 (长尾 ~7%), 用 g_joint_tail_mean_excess 单点近似
+//   把截断的长尾质量补回 MRL 计算, 让 MRL[0] 从无延伸的 ~82 修正回 ~104.68.
+//   g_joint_tail_mean_excess = E[首限定 | 首限定 > 240] - 240 ≈ 84.37 抽.
+//   动态计算 (不写死常量), 保证未来机制改动后自动跟上.
+double g_cdf_char[82]     = {};
+double g_cdf_wep[41]      = {};
 double g_cdf_char_up[122] = {};
 double g_cdf_wep_up[81]   = {};
+double g_cdf_joint_up[242] = {};
+double g_joint_tail_mean_excess = 0.0;
 bool   g_cdf_init = false;
 
 void InitCDFTables() {
@@ -278,8 +288,16 @@ void InitCDFTables() {
         for(int k=31;k<=40;++k){g_cdf_wep[k]=g_cdf_wep[k-1]+sw*(ls*bh/norm); ls*=bm;}
     }
 
-    // ---- 角色 UP CDF (双状态前向迭代) ----
-    // 不计入 30 抽 bonus 提前毕业, 与 g_cdf_char 处理方式对称
+    // ---- 角色 UP CDF (v0.1.1.1: 真实双状态前向迭代, 替换原 v0.1.1 的 50/50 简化) ----
+    //
+    // 真实双状态模型: D[s][h], h ∈ {0, 1} 表示是否处于 "大保底" 状态.
+    //   h=0: 未触发大保底, 出 6 星后 50% UP / 50% 进入 h=1
+    //   h=1: 已触发大保底, 出 6 星必为 UP
+    // n=30 处展开 11 次免费十连判定 (1 本体抽推进水位 + 10 次免费抽水位停).
+    // 第 120 抽硬保底强制全部毕业.
+    //
+    // 历史: v0.1.1 用单维 D[s] + p_hit * 0.5 简化模型, E[首 UP] ≈ 81.4 (偏差 7 抽),
+    //       v0.1.1.1 改真实双状态, E[首 UP] ≈ 74.16, 与社区数据 74.33 对齐.
     {
         constexpr int hard_cap = 120;
         constexpr int max_soft = 80;
@@ -288,29 +306,77 @@ void InitCDFTables() {
             if (k <= 79) return 0.058 + (k - 66) * 0.05;
             return 1.0;
         };
-        std::array<double, max_soft> D{}; D[0] = 1.0;
+        // D[h][s]: h=0 未触发大保底, h=1 已触发. 水位 s ∈ [0, 80)
+        std::array<std::array<double, max_soft>, 2> D{};
+        D[0][0] = 1.0;
         double cum = 0.0;
+
+        auto stepOnePull = [&](std::array<std::array<double, max_soft>, 2>& src,
+                               std::array<std::array<double, max_soft>, 2>& dst,
+                               double& p_finish,
+                               bool waterStops /* 免费抽水位停 */) {
+            for (int hh = 0; hh < 2; ++hh) {
+                for (int s = 0; s < max_soft; ++s) {
+                    if (src[hh][s] == 0) continue;
+                    double prob = src[hh][s];
+                    double ph = h_char(s + 1);
+                    // 不出 6 星: 水位推进 (或停)
+                    if (waterStops) {
+                        dst[hh][s] += prob * (1.0 - ph);
+                    } else if (s + 1 < max_soft) {
+                        dst[hh][s + 1] += prob * (1.0 - ph);
+                    }
+                    // 出 6 星
+                    if (hh == 1) {
+                        // 大保底: 必 UP, 毕业
+                        p_finish += prob * ph;
+                    } else {
+                        // 非大保底: 50% UP 毕业, 50% 非 UP 进入大保底
+                        p_finish += prob * ph * 0.5;
+                        if (waterStops) {
+                            dst[1][s] += prob * ph * 0.5;       // 水位停 (免费抽语义)
+                        } else {
+                            dst[1][0] += prob * ph * 0.5;       // 水位归 0 (本体抽)
+                        }
+                    }
+                }
+            }
+        };
+
         for (int n = 1; n <= hard_cap; ++n) {
             if (n == hard_cap) {
+                // 120 硬保底: 所有未毕业概率强制毕业
                 double alive = 0.0;
-                for (double v : D) alive += v;
+                for (int hh = 0; hh < 2; ++hh)
+                    for (int s = 0; s < max_soft; ++s)
+                        alive += D[hh][s];
                 cum += alive;
                 g_cdf_char_up[n] = std::min(1.0, cum);
                 for (int k = n + 1; k <= hard_cap + 1; ++k) g_cdf_char_up[k] = 1.0;
                 break;
             }
-            std::array<double, max_soft> newD{};
-            double p_hit = 0.0;
-            for (int s = 0; s < max_soft; ++s) {
-                if (D[s] == 0) continue;
-                double ph = h_char(s + 1);
-                p_hit += D[s] * ph;
-                if (s + 1 < max_soft) newD[s + 1] += D[s] * (1.0 - ph);
+
+            if (n == 30) {
+                // 1 次本体抽 + 10 次免费抽
+                std::array<std::array<double, max_soft>, 2> stateA{};
+                double p_finish = 0.0;
+                stepOnePull(D, stateA, p_finish, /*waterStops=*/false);
+                for (int free_step = 0; free_step < 10; ++free_step) {
+                    std::array<std::array<double, max_soft>, 2> stateB{};
+                    stepOnePull(stateA, stateB, p_finish, /*waterStops=*/true);
+                    stateA = stateB;
+                }
+                cum += p_finish;
+                g_cdf_char_up[n] = std::min(1.0, cum);
+                D = stateA;
+            } else {
+                std::array<std::array<double, max_soft>, 2> newD{};
+                double p_finish = 0.0;
+                stepOnePull(D, newD, p_finish, /*waterStops=*/false);
+                cum += p_finish;
+                g_cdf_char_up[n] = std::min(1.0, cum);
+                D = newD;
             }
-            cum += p_hit * 0.5;
-            g_cdf_char_up[n] = std::min(1.0, cum);
-            newD[0] += p_hit * 0.5;
-            D = newD;
         }
     }
 
@@ -360,19 +426,163 @@ void InitCDFTables() {
         }
     }
 
+    // ---- 辉光庆典 UP CDF (v0.1.2.4: 真实前向迭代 + 长尾解析延伸) ----
+    //
+    // 辉光庆典与 Special 池机制差异关键点:
+    //   (1) 池中 4 个 6 星均匀分布: 2 限定 + 2 常驻. P(限定|六星) = 50%
+    //   (2) 没有"大保底"——歪了下一次六星不保证是限定
+    //   (3) 没有 120 抽 UP 硬保底
+    //   (4) n=30 处赠送 10 次免费十连 (水位停)
+    //
+    // 等价模型: 重复独立"出 6 星"周期, 每周期 50% 概率出限定 (即停止).
+    // 完整理论期望: E[首限定] ≈ 104.68 抽.
+    //
+    // CDF 截到 X=240 (与图表 X 轴一致, 数组 g_cdf_joint_up[242]).
+    // CDF[240] ≈ 0.93, 长尾 ~7% 用 g_joint_tail_mean_excess 单点近似补回 MRL.
+    {
+        constexpr int max_soft = 80;
+        constexpr int max_n    = 240;
+        auto h_char = [](int k) -> double {
+            if (k <= 65)      return 0.008;
+            else if (k <= 79) return 0.058 + (k - 66) * 0.05;
+            else              return 1.0;
+        };
+        std::array<double, max_soft> D{}; D[0] = 1.0;
+        double cum = 0.0;
+        for (int n = 1; n <= max_n; ++n) {
+            std::array<double, max_soft> newD{};
+            double p_hit_grad = 0.0;
+
+            if (n == 30) {
+                // 本体抽 (1 次, 推进水位)
+                std::array<double, max_soft> stateA{};
+                for (int s = 0; s < max_soft; ++s) {
+                    if (D[s] == 0) continue;
+                    double ph = h_char(s + 1);
+                    if (s + 1 < max_soft) stateA[s + 1] += D[s] * (1.0 - ph);
+                    p_hit_grad += D[s] * ph * 0.5;
+                    stateA[0]  += D[s] * ph * 0.5;
+                }
+                // 免费十连 10 次 (水位停)
+                for (int free_step = 0; free_step < 10; ++free_step) {
+                    std::array<double, max_soft> newStateA{};
+                    for (int s = 0; s < max_soft; ++s) {
+                        if (stateA[s] == 0) continue;
+                        double ph = h_char(s + 1);
+                        newStateA[s] += stateA[s] * (1.0 - ph);
+                        p_hit_grad   += stateA[s] * ph * 0.5;
+                        newStateA[s] += stateA[s] * ph * 0.5;
+                    }
+                    stateA = newStateA;
+                }
+                newD = stateA;
+            } else {
+                for (int s = 0; s < max_soft; ++s) {
+                    if (D[s] == 0) continue;
+                    double ph = h_char(s + 1);
+                    if (s + 1 < max_soft) newD[s + 1] += D[s] * (1.0 - ph);
+                    p_hit_grad += D[s] * ph * 0.5;
+                    newD[0]    += D[s] * ph * 0.5;
+                }
+            }
+
+            cum += p_hit_grad;
+            g_cdf_joint_up[n] = std::min(1.0, cum);
+            D = newD;
+        }
+
+        // ---- 长尾解析延伸常量 g_joint_tail_mean_excess ----
+        // CDF 在 max_n=240 只到 ~0.93, 直接算 MRL[0] 会低估到 ~82 (真值 ~105).
+        // 临时 simulate 到 n=2000 算 E[首限定 | 首限定 > 240] - 240 ≈ 84.37.
+        // 见 Windows gui.cpp v0.1.2.4 注释 (此处行为完全一致).
+        {
+            constexpr int tail_sim_n = 2000;
+            std::array<double, max_soft> D2{}; D2[0] = 1.0;
+            double tail_sum_k_pdf = 0.0;
+            double tail_mass      = 0.0;
+            for (int n = 1; n <= tail_sim_n; ++n) {
+                std::array<double, max_soft> newD2{};
+                double p_hit_grad = 0.0;
+
+                if (n == 30) {
+                    std::array<double, max_soft> stateA{};
+                    for (int s = 0; s < max_soft; ++s) {
+                        if (D2[s] == 0) continue;
+                        double ph = h_char(s + 1);
+                        if (s + 1 < max_soft) stateA[s + 1] += D2[s] * (1.0 - ph);
+                        p_hit_grad  += D2[s] * ph * 0.5;
+                        stateA[0]   += D2[s] * ph * 0.5;
+                    }
+                    for (int free_step = 0; free_step < 10; ++free_step) {
+                        std::array<double, max_soft> newStateA{};
+                        for (int s = 0; s < max_soft; ++s) {
+                            if (stateA[s] == 0) continue;
+                            double ph = h_char(s + 1);
+                            newStateA[s] += stateA[s] * (1.0 - ph);
+                            p_hit_grad   += stateA[s] * ph * 0.5;
+                            newStateA[s] += stateA[s] * ph * 0.5;
+                        }
+                        stateA = newStateA;
+                    }
+                    newD2 = stateA;
+                } else {
+                    for (int s = 0; s < max_soft; ++s) {
+                        if (D2[s] == 0) continue;
+                        double ph = h_char(s + 1);
+                        if (s + 1 < max_soft) newD2[s + 1] += D2[s] * (1.0 - ph);
+                        p_hit_grad += D2[s] * ph * 0.5;
+                        newD2[0]   += D2[s] * ph * 0.5;
+                    }
+                }
+
+                double pdf_n = p_hit_grad;
+                if (n > max_n) {
+                    tail_sum_k_pdf += (double)n * pdf_n;
+                    tail_mass      += pdf_n;
+                }
+                D2 = newD2;
+            }
+            if (tail_mass > 1e-12) {
+                double E_tail = tail_sum_k_pdf / tail_mass;
+                g_joint_tail_mean_excess = E_tail - (double)max_n;
+            } else {
+                g_joint_tail_mean_excess = 0.0;
+            }
+            // 预期值: g_joint_tail_mean_excess ≈ 84.37 抽
+        }
+    }
+
     g_cdf_init = true;
 }
 
 // ------ KS 检验 ------
-// 修复:freq 的合法索引是 [0, 149];max_pity 必须 clamp 否则越界读
-double ComputeKS(const std::array<int,150>& freq,int max_pity,int n,const double* cdf,int cdf_len){
+// 修复:freq 的合法索引是 [0, 259];max_pity 必须 clamp 否则越界读
+double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,const double* cdf,int cdf_len){
     if(!n) return 0.0;
-    if(max_pity > 149) max_pity = 149;        // 防御性 clamp
+    if(max_pity > 259) max_pity = 259;        // 防御性 clamp
+    // v0.1.2.2: 找到 CDF 表的"有效末端" last_valid (饱和到 1 或单调性破坏前的最后一格).
+    // 越过 last_valid 后, 用 cdf[last_valid] 而非 1.0 作 fallback —— 这对辉光池
+    // (cdf 在 X=240 处 ≈ 0.93, X>240 时 CDF 仍未达 1) 很关键; 旧代码用 1.0 fallback
+    // 会让长尾区域的 K-S 偏离凭空变大. 此外对"未填充哨兵段"(辉光池 cdf[241]=0)
+    // 也需提前截断, 避免单调性破坏导致 |cum - 0| ≈ 1 的虚假最大偏离.
+    constexpr double EPS_SAT = 1e-6;
+    int last_valid = cdf_len - 1;
+    for (int k = 1; k < cdf_len; ++k) {
+        if (cdf[k] >= 1.0 - EPS_SAT) { last_valid = k; break; }
+        if (cdf[k] + EPS_SAT < cdf[k - 1]) { last_valid = k - 1; break; }
+    }
+    auto lookup_cdf = [&](int idx) -> double {
+        if (idx < 0) return 0.0;
+        if (idx > last_valid) return cdf[last_valid];
+        return cdf[idx];
+    };
     double md=0.0; int cum=0;
     for(int x=1;x<=max_pity;++x){
-        double fb=(double)cum/n, cb=(x-1<cdf_len)?cdf[x-1]:1.0;
+        double fb=(double)cum/n;
+        double cb=lookup_cdf(x - 1);
         cum+=freq[x];
-        double fa=(double)cum/n, ca=(x<cdf_len)?cdf[x]:1.0;
+        double fa=(double)cum/n;
+        double ca=lookup_cdf(x);
         double d1=std::abs(fb-cb), d2=std::abs(fa-ca);
         if(d1>md) md=d1; if(d2>md) md=d2;
     }
@@ -400,8 +610,8 @@ inline double SampleVariance(long long sum,long long sum_sq,int n){
 
 // ------ 统计结果结构(内部用) ------
 struct StatsResult {
-    std::array<int,150>    freq_all{}, freq_up{};
-    std::array<double,150> hazard_all{}, hazard_up{};
+    std::array<int,260>    freq_all{}, freq_up{};
+    std::array<double,260> hazard_all{}, hazard_up{};
     int count_all=0, count_up=0, win_5050=0, lose_5050=0;
     double avg_all=0, avg_up=0, avg_win=-1, cv_all=0, ci_all_err=0, ci_up_err=0;
     double win_rate_5050=-1, ks_d_all=0, ks_d_up=0;
@@ -419,7 +629,13 @@ struct StatsResult {
 //     合并 hazard `1-(1-0.008)^11` 对齐),sum_all/sum_up 也用 30 计入
 //   - 赠送出货不重置玩家本体的 cur_pity (按"独立通道"语义)
 //   - 仍计入 count_all / count_up / win_5050 / lose_5050,因为这是真实出货
-StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
+//
+// v0.1.2.0 加 isJoint 参数:
+//   - 辉光池没有"小保底"概念 (每个 6 星独立 50% 出限定),
+//     win_5050 / lose_5050 按"每个 6 星是不是限定"独立计数 (跟武器池一样).
+//   - 也不维护 had_non_up 状态.
+//   - UP 判定走 standard_names 排除法 (pool_map 为空).
+StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     const std::unordered_set<std::string,StringHash,std::equal_to<>>& std_names,
     const std::unordered_map<std::string,std::string,StringHash,std::equal_to<>>& pool_map)
 {
@@ -442,28 +658,35 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
         //   - 赠送十连出货 -> 归入 freq[30] (与理论 CDF 第30抽合并判定一致)
         //   - 正常出货 -> 归入 freq[cur_pity]
         const int slot_all = isFree ? 30 : cur_pity;
-        if(slot_all<150) acc.freq_all[slot_all]++;
+        if(slot_all<260) acc.freq_all[slot_all]++;
         if(slot_all>acc.max_pity_all) acc.max_pity_all=slot_all;
         acc.count_all++;
         acc.sum_all    += slot_all;
         acc.sum_sq_all += (long long)slot_all*slot_all;
 
         bool isUP=false;
-        auto it=pool_map.find(bucket.poolNames[i]);
-        if(it!=pool_map.end()) isUP=(bucket.names[i]==it->second);
-        else                   isUP=!std_names.contains(bucket.names[i]);
+        if (isJoint) {
+            // 辉光池: pool_map 为空, 直接走 standard_names 排除法 (非常驻 = 限定)
+            isUP = !std_names.contains(bucket.names[i]);
+        } else {
+            auto it=pool_map.find(bucket.poolNames[i]);
+            if(it!=pool_map.end()) isUP=(bucket.names[i]==it->second);
+            else                   isUP=!std_names.contains(bucket.names[i]);
+        }
 
         if(isUP){
             const int slot_up = isFree ? 30 : pity_up;
-            if(slot_up<150) acc.freq_up[slot_up]++;
+            if(slot_up<260) acc.freq_up[slot_up]++;
             if(slot_up>acc.max_pity_up) acc.max_pity_up=slot_up;
             acc.count_up++;
             acc.sum_up    += slot_up;
             acc.sum_sq_up += (long long)slot_up*slot_up;
 
-            if(isWeapon){
+            if(isWeapon || isJoint){
+                // 武器池/辉光池: 每个 6 星独立 50% (joint) 或 25% (weapon) 判定
                 acc.win_5050++;
             } else if(!had_non_up){
+                // 角色 (Special) 池: 小保底"赢/输"概念
                 acc.win_5050++;
                 acc.count_win++;
                 acc.sum_win += slot_all;
@@ -472,7 +695,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
             // 赠送十连出 UP 不重置 pity_up (独立通道); 正常出 UP 重置
             if (!isFree) pity_up=0;
         } else {
-            if(isWeapon)              acc.lose_5050++;
+            if(isWeapon || isJoint)   acc.lose_5050++;
             else if(!had_non_up)      acc.lose_5050++;
             had_non_up=true;
         }
@@ -482,11 +705,11 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
     acc.censored_pity_all = cur_pity;
     acc.censored_pity_up  = pity_up;
 
-    // 防御性 clamp:即使数据异常导致 max_pity > 149,后续读取也必须安全
-    if (acc.max_pity_all > 149) acc.max_pity_all = 149;
-    if (acc.max_pity_up  > 149) acc.max_pity_up  = 149;
-    if (acc.censored_pity_all > 149) acc.censored_pity_all = 149;
-    if (acc.censored_pity_up  > 149) acc.censored_pity_up  = 149;
+    // 防御性 clamp:即使数据异常导致 max_pity > 259,后续读取也必须安全
+    if (acc.max_pity_all > 259) acc.max_pity_all = 259;
+    if (acc.max_pity_up  > 259) acc.max_pity_up  = 259;
+    if (acc.censored_pity_all > 259) acc.censored_pity_all = 259;
+    if (acc.censored_pity_up  > 259) acc.censored_pity_up  = 259;
 
     StatsResult s;
     // std::array 整体赋值 = 编译器优化的 memcpy,与 gui.cpp 一致
@@ -515,7 +738,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
     if(acc.count_all>0 || acc.censored_pity_all>0){
         int surv = acc.count_all + (acc.censored_pity_all>0 ? 1 : 0);
         int maxR = std::max(acc.max_pity_all, acc.censored_pity_all);
-        if (maxR > 149) maxR = 149;
+        if (maxR > 259) maxR = 259;
         for(int x=1; x<=maxR; ++x){
             if(surv>0){
                 s.hazard_all[x] = (double)acc.freq_all[x]/surv;
@@ -528,9 +751,12 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
         s.avg_up = (double)acc.sum_up/acc.count_up;
         double var = SampleVariance(acc.sum_up, acc.sum_sq_up, acc.count_up);
         s.ci_up_err = TCritical95(acc.count_up-1) * std::sqrt(var) / std::sqrt((double)acc.count_up);
-        // UP KS 检验: 用 g_cdf_*_up (v0.1.2 起)
-        const double* cdf_up = isWeapon ? g_cdf_wep_up : g_cdf_char_up;
-        int clen_up = isWeapon ? 81 : 122;
+        // UP KS 检验: 用 g_cdf_*_up
+        // v0.1.2.0: 辉光池走 g_cdf_joint_up
+        const double* cdf_up; int clen_up;
+        if (isJoint)       { cdf_up = g_cdf_joint_up; clen_up = 242; }
+        else if (isWeapon) { cdf_up = g_cdf_wep_up;   clen_up = 81;  }
+        else               { cdf_up = g_cdf_char_up;  clen_up = 122; }
         s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up, clen_up);
         s.ks_is_normal_up = (s.ks_d_up <= 1.36/std::sqrt((double)acc.count_up));
     }
@@ -538,7 +764,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon,
     if(acc.count_up>0 || acc.censored_pity_up>0){
         int surv = acc.count_up + (acc.censored_pity_up>0 ? 1 : 0);
         int maxR = std::max(acc.max_pity_up, acc.censored_pity_up);
-        if (maxR > 149) maxR = 149;
+        if (maxR > 259) maxR = 259;
         for(int x=1; x<=maxR; ++x){
             if(surv>0){
                 s.hazard_up[x] = (double)acc.freq_up[x]/surv;
@@ -583,7 +809,7 @@ GachaChartData* ToChartData(const StatsResult& s) {
 }
 
 // ------ 文本格式化 ------
-NSString* FormatOutput(const StatsResult& sc, const StatsResult& sw) {
+NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj, const StatsResult& sw) {
     auto pendStr = [](int pa, int pu) -> NSString* {
         if(!pa && !pu) return @"";
         return [NSString stringWithFormat:@"  [当前垫刀: 距上次六星 %d 抽 / 距上次 UP %d 抽]", pa, pu];
@@ -597,6 +823,9 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sw) {
         @" ▶ 综合六星 (含歪) 出货平均期望:     %.2f 抽 (理论 ≈ 51.81)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
         @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 74.33)   [95%% CI: %.1f ~ %.1f]    |   真实不歪率: %.1f%% (理论 50%%) (%ld胜%ld负)\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
         @" ▶ 赢下小保底 (不歪) 的出货期望:     %@\n\n"
+        @"【角色卡池 (辉光庆典)】 总计六星: %d | 出限定: %d%@\n"
+        @" ▶ 综合六星出货平均期望:             %.2f 抽 (理论 ≈ 51.81)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
+        @" ▶ 抽到任一限定 (非常驻) 的平均期望: %.2f 抽 (理论 ≈ 103.62)  [95%% CI: %.1f ~ %.1f]    |   非常驻六星率: %.1f%% (理论 50%%) (%ld限定%ld常驻)\t[K-S 检验偏离度 D值: %.3f (%@)]\n\n"
         @"【武器卡池 (武库申领)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星出货平均期望:             %.2f 抽 (理论 ≈ 19.17)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
         @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 81.66)   [95%% CI: %.1f ~ %.1f]    |   6 星中 UP 率: %.1f%% (理论 25%%) (%ld UP / %ld 非UP)\t[K-S 检验偏离度 D值: %.3f (%@)]",
@@ -608,6 +837,13 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sw) {
             (long)sc.win_5050, (long)sc.lose_5050,
             sc.ks_d_up, ksLabel(sc.count_up, sc.ks_is_normal_up),
             winC,
+        sj.count_all, sj.count_up, pendStr(sj.censored_pity_all,sj.censored_pity_up),
+        sj.avg_all, std::max(1.0, sj.avg_all-sj.ci_all_err), sj.avg_all+sj.ci_all_err,
+            sj.cv_all*100, sj.ks_d_all, ksLabel(sj.count_all, sj.ks_is_normal),
+        sj.avg_up, std::max(1.0, sj.avg_up-sj.ci_up_err), sj.avg_up+sj.ci_up_err,
+            (sj.win_rate_5050>=0?sj.win_rate_5050:0.0)*100,
+            (long)sj.win_5050, (long)sj.lose_5050,
+            sj.ks_d_up, ksLabel(sj.count_up, sj.ks_is_normal_up),
         sw.count_all, sw.count_up, pendStr(sw.censored_pity_all,sw.censored_pity_up),
         sw.avg_all, std::max(1.0, sw.avg_all-sw.ci_all_err), sw.avg_all+sw.ci_all_err,
             sw.cv_all*100, sw.ks_d_all, ksLabel(sw.count_all, sw.ks_is_normal),
@@ -699,12 +935,17 @@ void* analyze_worker(void* arg) {
             ItemType  it = ParseItemType (ExtractJsonValue(item, "item_type",  true));
             RankType  rt = ParseRankType (ExtractJsonValue(item, "rank_type",  true));
             GachaType gt = ParseGachaType(ExtractJsonValue(item, "gacha_type", true));
+            // v0.1.2.0: 接受三类记录
+            //   cp = 角色 Special (特许寻访)
+            //   jp = 角色 Joint   (辉光庆典)
+            //   wp = 武器 (Special / Joint 之外的武器记录都算武器池)
             bool cp = (it==ItemType::Character && gt==GachaType::Special);
+            bool jp = (it==ItemType::Character && gt==GachaType::Joint);
             bool wp = (it==ItemType::Weapon
                       && gt!=GachaType::Constant
                       && gt!=GachaType::Standard
                       && gt!=GachaType::Beginner);
-            if(!cp && !wp) return;
+            if(!cp && !jp && !wp) return;
 
             auto name = ExtractJsonValue(item, "item_name", true);
             auto pn   = ExtractJsonValue(item, "pool_name", true);
@@ -739,24 +980,29 @@ void* analyze_worker(void* arg) {
             if(less(temps[i], temps[i-1])){sorted=false; break;}
         if(!sorted) std::ranges::sort(temps, less);
 
-        PullBucket bucketChar(alloc); bucketChar.reserve(4000);
-        PullBucket bucketWep (alloc); bucketWep.reserve(2000);
+        PullBucket bucketChar (alloc); bucketChar.reserve(4000);
+        PullBucket bucketJoint(alloc); bucketJoint.reserve(2000);
+        PullBucket bucketWep  (alloc); bucketWep.reserve(2000);
         for(const auto& t : temps){
             if(t.it==ItemType::Character && t.gt==GachaType::Special)
                 bucketChar.push_back(t.rt, t.name, t.poolName, t.isFree);
+            else if(t.it==ItemType::Character && t.gt==GachaType::Joint)
+                bucketJoint.push_back(t.rt, t.name, t.poolName, t.isFree);
             else
                 bucketWep.push_back(t.rt, t.name, t.poolName, t.isFree);
         }
 
-        StatsResult sc = Calculate(bucketChar, false, stdChars, pm);
-        StatsResult sw = Calculate(bucketWep,  true,  stdWeps,  {});
+        StatsResult sc = Calculate(bucketChar,  false, false, stdChars, pm);
+        StatsResult sj = Calculate(bucketJoint, false, true,  stdChars, {});  // joint 走 stdChars 排除法, pool_map 空
+        StatsResult sw = Calculate(bucketWep,   true,  false, stdWeps,  {});
 
-        // 关键:在 sc/sw 完全完成后才解除映射,因为 PullBucket.names/poolNames
+        // 关键:在 sc/sj/sw 完全完成后才解除映射,因为 PullBucket.names/poolNames
         // 持有指向 mmap 内存的 string_view,Calculate 需要它们有效
         munmap((void*)mapData, fileSize);
 
-        ctx->result.textOutput = FormatOutput(sc, sw);
+        ctx->result.textOutput = FormatOutput(sc, sj, sw);
         ctx->result.statsChar  = ToChartData(sc);
+        ctx->result.statsJoint = ToChartData(sj);
         ctx->result.statsWep   = ToChartData(sw);
         ctx->result.ok = YES;
     }

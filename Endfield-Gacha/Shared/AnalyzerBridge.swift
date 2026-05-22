@@ -22,10 +22,11 @@ import Foundation
 // 字段默认值: 用 memberwise init 而非 static property, 避免静态属性被推断为
 // @MainActor 隔离 (因为 ContentView.AnalysisBundle 引用链会污染整个类型上下文)。
 struct ChartData: Sendable {
-    var freq_all:   [Int32]  = Array(repeating: 0,   count: 150)
-    var freq_up:    [Int32]  = Array(repeating: 0,   count: 150)
-    var hazard_all: [Double] = Array(repeating: 0.0, count: 150)
-    var hazard_up:  [Double] = Array(repeating: 0.0, count: 150)
+    // v0.1.2.0: 数组从 150 扩到 260, 容纳辉光池 0..240 的 pity 范围.
+    var freq_all:   [Int32]  = Array(repeating: 0,   count: 260)
+    var freq_up:    [Int32]  = Array(repeating: 0,   count: 260)
+    var hazard_all: [Double] = Array(repeating: 0.0, count: 260)
+    var hazard_up:  [Double] = Array(repeating: 0.0, count: 260)
     var count_all:  Int    = 0
     var count_up:   Int    = 0
     var avg_all:    Double = 0
@@ -49,9 +50,12 @@ struct ChartData: Sendable {
 //
 // 共享类型。提到顶层后,iOS 的 AnalysisView_iOS 与 macOS 的 ContentView
 // 都可以直接用。
+// v0.1.2.0: 加 statsJoint (辉光庆典池). 老调用方在拿不到时可以为 nil 容错,
+//   但新代码路径应该总是设置 (AnalyzerBridge 保证).
 struct AnalysisBundle: Sendable {
-    var statsChar: ChartData
-    var statsWep:  ChartData
+    var statsChar:  ChartData
+    var statsJoint: ChartData
+    var statsWep:   ChartData
 }
 
 struct AnalysisBundleResult {
@@ -122,17 +126,21 @@ enum AnalyzerBridge {
 
         guard result.ok,
               let sc = result.statsChar,
+              let sj = result.statsJoint,
               let sw = result.statsWep else {
             let msg = result.textOutput ?? "分析失败"
             return AnalysisBundleResult(outputText: msg, charts: nil)
         }
 
-        let chartChar = toChartData(sc)
-        let chartWep  = toChartData(sw)
+        let chartChar  = toChartData(sc)
+        let chartJoint = toChartData(sj)
+        let chartWep   = toChartData(sw)
 
         return AnalysisBundleResult(
             outputText: result.textOutput ?? "",
-            charts: AnalysisBundle(statsChar: chartChar, statsWep: chartWep)
+            charts: AnalysisBundle(statsChar:  chartChar,
+                                   statsJoint: chartJoint,
+                                   statsWep:   chartWep)
         )
     }
 }

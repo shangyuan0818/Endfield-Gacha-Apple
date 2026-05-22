@@ -37,61 +37,77 @@ struct ContentView: View {
     @State private var showFetcher: Bool = false
 
     var body: some View {
-        VStack(spacing: 14) {
-            // ============ 顶部配置行 ============
-            VStack(alignment: .leading, spacing: 10) {
-                Text("支持\u{201C}限定角色卡池:当期UP角色\u{201D}映射。未包含的限定角色卡池将仅排查常驻六星角色名单。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-
-                LabeledRow(label: "常驻六星角色", text: $chars)
-                LabeledRow(label: "当期 UP 角色", text: $pool)
-                LabeledRow(label: "常驻六星武器", text: $weps)
-            }
-            .padding(14)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-
-            // ============ 文字输出区 ============
-            ScrollView {
-                Text(outputText)
-                    .font(.system(size: 12, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-            }
-            .frame(height: 180)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.separator, lineWidth: 1)
-            )
-
-            // ============ 图表区(4 宫格) ============
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.background.secondary)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(.separator, lineWidth: 1)
-                    )
-
-                if let a = analysis {
-                    // macOS 始终用 2x2 (等价于默认值)
-                    ChartGridView(statsChar: a.statsChar,
-                                  statsWep: a.statsWep,
-                                  layout: .grid2x2)
-                        .padding(10)
-                } else if isProcessing {
-                    ProgressView("分析中...")
-                        .controlSize(.large)
-                } else {
-                    Text("等待分析数据...")
+        // 整个主区域用 ScrollView 包裹:小屏 MacBook 缩小窗口时
+        // 武器卡池/底部图表会被 Dock 或屏幕底端遮挡,这里让用户能滚动查看。
+        // 注意:
+        //  - ScrollView 内部 maxHeight: .infinity 会塌缩,所以图表区改用 minHeight 保底
+        //  - padding/overlay/toolbar/onDrop/sheet 等修饰符放在 ScrollView 外,
+        //    保证拖入高亮层、工具栏、弹窗依然覆盖整个窗口
+        ScrollView {
+            VStack(spacing: 14) {
+                // ============ 顶部配置行 ============
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("支持\u{201C}限定角色卡池:当期UP角色\u{201D}映射。未包含的限定角色卡池将仅排查常驻六星角色名单。")
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
+
+                    LabeledRow(label: "常驻六星角色", text: $chars)
+                    LabeledRow(label: "当期 UP 角色", text: $pool)
+                    LabeledRow(label: "常驻六星武器", text: $weps)
                 }
+                .padding(14)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+
+                // ============ 文字输出区 ============
+                ScrollView {
+                    Text(outputText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(height: 180)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.separator, lineWidth: 1)
+                )
+
+                // ============ 图表区(4 宫格) ============
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.background.secondary)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(.separator, lineWidth: 1)
+                        )
+
+                    if isProcessing {
+                        ProgressView("分析中...")
+                            .controlSize(.large)
+                    } else {
+                        // 无导入数据时也显示 6 张图: 传入空的 AnalysisBundle,
+                        // ChartGridView 内部 ECDFCanvas / MRLCanvas 在 count_all=0
+                        // && count_up=0 时会画坐标轴 + 理论参考曲线 + 灰色
+                        // "暂无出金数据" 提示 (v0.1.2.1 行为, 与 Windows / iOS 一致).
+                        let bundle = analysis ?? AnalysisBundle(
+                            statsChar:  ChartData(),
+                            statsJoint: ChartData(),
+                            statsWep:   ChartData()
+                        )
+                        ChartGridView(statsChar:  bundle.statsChar,
+                                      statsJoint: bundle.statsJoint,
+                                      statsWep:   bundle.statsWep,
+                                      layout: .grid2x2)
+                            .padding(10)
+                    }
+                }
+                // ScrollView 里 maxHeight: .infinity 会塌缩,这里给 minHeight 保底,
+                // 让图表始终有足够的展示高度(原窗口约 1100,减去顶部配置+文字输出后剩 ~750)
+                .frame(maxWidth: .infinity, minHeight: 750)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(16)
         }
-        .padding(16)
         .overlay(
             // 拖入高亮层
             RoundedRectangle(cornerRadius: 18)

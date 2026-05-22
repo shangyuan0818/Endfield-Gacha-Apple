@@ -249,7 +249,7 @@ struct PoolCfg{
     pthread_attr_setstacksize(&attr, 4 * 1024 * 1024);
 
     pthread_t tid;
-    pthread_create(&tid, &attr, +[](void* arg) -> void* {
+    int create_err = pthread_create(&tid, &attr, +[](void* arg) -> void* {
         @autoreleasepool {
         auto* ctx = (FetcherCtx*)arg;
         NSString* capturedUrl       = ctx->url;
@@ -310,6 +310,7 @@ struct PoolCfg{
 
         std::vector<PoolCfg> pools = {
             {"E_CharacterGachaPoolType_Special",  "角色 - 特许寻访", false},
+            {"E_CharacterGachaPoolType_Joint",    "角色 - 辉光庆典", false},   // v0.1.2.0: 辉光庆典池
             {"E_CharacterGachaPoolType_Standard", "角色 - 基础寻访", false},
             {"E_CharacterGachaPoolType_Beginner", "角色 - 启程寻访", false},
             {"",                                   "武器 - 全历史记录", true}
@@ -577,7 +578,7 @@ struct PoolCfg{
             }
             w.WriteLit(",\n");
             w.WriteLit("        \"export_app\": \"Endfield Gacha (macOS)\",\n"
-                       "        \"export_app_version\": \"v2.5.0\",\n"
+                       "        \"export_app_version\": \"v2.6.0\",\n"
                        "        \"version\": \"v4.2\",\n");
             // export_time 不在 v4.2 必需字段里,但保留作为人类可读辅助信息
             w.WriteLit("        \"export_time\": \"");
@@ -636,7 +637,23 @@ struct PoolCfg{
         }  // @autoreleasepool
         return nullptr;
     }, ctx);
-    pthread_detach(tid);  // fire-and-forget,worker 完成后自动回收
     pthread_attr_destroy(&attr);
+
+    // 错误检查: pthread_create 失败时 tid 未定义, 不能 detach;
+    // 已分配的 ctx 必须手动释放; 必须主动触发 completion 否则 UI 永远卡在
+    // "拉取中..." 状态. 对齐 AnalyzerWrapper.mm 的同款错误处理.
+    if (create_err != 0) {
+        delete ctx;
+        if (completionBlock) {
+            NSString* errMsg = [NSString stringWithFormat:
+                @"底层大栈线程创建失败 (errno=%d)", create_err];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionBlock(NO, 0, 0, nil, errMsg);
+            });
+        }
+        return;
+    }
+
+    pthread_detach(tid);  // fire-and-forget,worker 完成后自动回收
 }
 @end
