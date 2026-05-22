@@ -28,7 +28,7 @@ Gacha tracker and visualizer for Arknights: Endfield on macOS &amp; iOS. Built w
 ## Compatibility / 兼容性
 ### macOS
 - **OS / 系统**: macOS 14.0 or higher (Sonoma+). macOS 14.0或更高。
-- **Architecture / 架构**: Universal Binary (Native support for both **Intel (x86_64)** and **Apple Silicon (arm64)**). 通用二进制。
+- **Architecture / 架构**: Universal Binary. 通用二进制。
 - **Run Destination**: Any Mac (arm64, x86_64)
 - **64-bit Only / 纯64位**: Some features of SwiftUI require at least macOS 14.0. In addition, macOS has dropped support for 32-bit (i386) applications since version 10.15. This tool is 64-bit only. 部分 SwiftUI 功能最低要求 macOS 14.0。此外，由于 macOS 10.15 后不再支持 32 位应用，本工具仅支持 64 位架构。
 
@@ -38,7 +38,7 @@ Gacha tracker and visualizer for Arknights: Endfield on macOS &amp; iOS. Built w
 - **Run Destination**: Any iOS Device (arm64)
 
 > ### Windows
-> Please check the Windows Win32 version here 请查看该Win32版本: [Endfield-Gacha](https://github.com/shangyuan0818/Endfield-Gacha)
+> Please check the Win32 version here 请查看该Win32版本: [Endfield-Gacha](https://github.com/shangyuan0818/Endfield-Gacha)
 
 
 
@@ -47,14 +47,3 @@ Gacha tracker and visualizer for Arknights: Endfield on macOS &amp; iOS. Built w
 For details regarding data handling and usage, please refer to our [Privacy Policy](privacy-policy.md).
 
 关于数据处理与使用的详细说明，请参阅我们的[隐私政策](privacy-policy.md)。
-
-
-
-## Source Code (old) 源代码（旧版）
-
-The current codebase is undergoing rapid iteration and major refactoring. Old source code is in the folder `old`.
-
-目前代码库正在经历快速迭代与重构。旧版源代码位于文件夹`old`中
-
-### Warning: Old source code contians known bugs and incorrect calculation logic.
-### 警告：旧版源代码有已知故障和错误的计算逻辑。
