@@ -12,7 +12,7 @@
 //
 //  数据来源:
 //    1) 用户点导入,弹文件选择器
-//    2) 拉取 Tab 完成后通过 pendingPath 推送过来
+//    2) 拉取 Tab 完成后通过 pendingURL 推送过来
 //
 //  注意:iOS 安全作用域 URL 必须 startAccessingSecurityScopedResource()
 //  才能读;这里在分析期间持有,完成后 stop。
@@ -22,14 +22,17 @@
 
 import SwiftUI
 import UIKit
+import Foundation        // NSFileCoordinator
 import UniformTypeIdentifiers
 
 struct AnalysisView_iOS: View {
     @Environment(AppConfig.self) private var config
     @Environment(\.horizontalSizeClass) private var hSize
 
-    /// 来自拉取 Tab 的待分析路径。消费一次后置 nil。
-    @Binding var pendingPath: String?
+    /// 来自拉取 Tab 的待分析文件 URL。消费一次后置 nil。
+    /// 用 URL (而非 path): 保留外部文件安全作用域 —— 从 path 重建会丢失系统授予的访问权
+    /// (见 runAnalysisWithSecurityScope)。
+    @Binding var pendingURL: URL?
 
     @State private var outputText: String = "点击右上角「导入」选择 UIGF JSON 文件,\n或在「拉取」标签页从 URL 抓取数据"
     @State private var analysis: AnalysisBundle? = nil
@@ -136,17 +139,16 @@ struct AnalysisView_iOS: View {
                     outputText = "选择文件失败: \(err.localizedDescription)"
                 }
             }
-            // 接收来自拉取 Tab 的待分析路径
-            .onChange(of: pendingPath) { _, newPath in
-                guard let p = newPath else { return }
-                pendingPath = nil  // 消费一次,避免重入
-                let url = URL(fileURLWithPath: p)
+            // 接收来自拉取 Tab 的待分析 URL (直接用该 URL, 不从 path 重建, 以保留安全作用域)
+            .onChange(of: pendingURL) { _, newURL in
+                guard let url = newURL else { return }
+                pendingURL = nil  // 消费一次,避免重入
                 runAnalysisWithSecurityScope(url: url)
             }
         }
     }
 
-    /// 包装:获取安全作用域 → 分析 → 释放
+    /// 包装:获取安全作用域 → 协调读 → 分析 → 释放
     /// iOS 沙盒外的文件(用户从"文件"App 选的)必须这样访问,否则读不到内容。
     private func runAnalysisWithSecurityScope(url: URL) {
         // 注意:不能在 defer 里 stop,因为分析是异步的。
@@ -157,18 +159,54 @@ struct AnalysisView_iOS: View {
         analysis = nil
         outputText = "正在分析 \(url.lastPathComponent)..."
 
-        let path = url.path
         let chars = config.chars
         let pool  = config.pool
         let weps  = config.weps
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let bundle = AnalyzerBridge.analyze(
-                filePath: path, chars: chars, poolMap: pool, weapons: weps
+            // ── 为什么用 NSFileCoordinator 协调读 ────────────────────────
+            // 文档选择器 / iCloud 给的是与其他进程共享的 in-place 文件。Apple
+            // 约定访问这类文件应走文件协调:本次读取会与其他协调参与者(iCloud
+            // 同步守护进程、其他 App 的写入等)互斥,不会和正持有协调锁的写入并发。
+            // 这是访问这类 URL 的规范做法。
+            //   (注:实践中 iCloud / 文件替换多走"临时文件 + 原子改名",裸读一般
+            //    只会看到旧或新的完整文件、而非撕裂的中间态;所以这里协调读的实际
+            //    收益偏防御性,主要价值是遵循规范、与协调写互斥,而非"必然消除
+            //    torn read"。)
+            //
+            // 为什么用 .withoutChanges:这是纯读取。默认读意图会先通知相关
+            // presenter 把未保存改动落盘(savePresentedItemChanges)再读;
+            // .withoutChanges 明确跳过这一步——按磁盘当前内容协调读取,不触发
+            // 写方保存。它仍是协调读(仍与协调写互斥),只是不附带"让写方先保存"
+            // 这个带副作用的动作,对本场景(文件由别处生成、已同步落盘)足够。
+            //
+            // 时序要点:协调读是同步的,访问权仅在 byAccessor 闭包内有效,所以
+            //   整个 analyze(含其内部 mmap)必须在闭包内同步跑完。analyze 现在是【直接同步
+            //   调用】(已去掉内部多余 pthread),仍会阻塞到分析结束,天然满足"读取全程处于协调块内"。
+            let coordinator = NSFileCoordinator()
+            var coordError: NSError?
+            var bundle: AnalysisBundleResult?
+
+            coordinator.coordinate(readingItemAt: url,
+                                    options: .withoutChanges,
+                                    error: &coordError) { coordinatedURL in
+                bundle = AnalyzerBridge.analyze(
+                    filePath: coordinatedURL.path,
+                    chars: chars, poolMap: pool, weapons: weps
+                )
+            }
+
+            // 协调失败(极少见:文件被删 / 权限丢失 / 无法授予协调访问)时兜底,
+            // 给出可读错误而不是空结果。
+            let result = bundle ?? AnalysisBundleResult(
+                outputText: coordError.map { "文件协调读取失败: \($0.localizedDescription)" }
+                    ?? "分析失败 (未知错误)",
+                charts: nil
             )
+
             DispatchQueue.main.async {
-                self.outputText = bundle.outputText
-                self.analysis = bundle.charts
+                self.outputText = result.outputText
+                self.analysis = result.charts
                 self.isProcessing = false
                 if needsAccess {
                     url.stopAccessingSecurityScopedResource()
@@ -355,9 +393,9 @@ private struct PoolDetailCard: View {
     }
     private var theoryAvgUp: Double {
         switch kind {
-        case .character: return 74.33
-        case .joint:     return 103.62  // 辉光池首限定期望 (E[首6星]/0.5)
-        case .weapon:    return 81.66
+        case .character: return 79.29
+        case .joint:     return 104.68  // 辉光池首限定完整理论期望 (含长尾修正; 朴素 E[首6星]/0.5=103.62 偏低)
+        case .weapon:    return 54.74
         }
     }
     private var theoryUpRate: Double {
@@ -475,28 +513,28 @@ private struct PoolDetailCard: View {
                     hint: nil
                 )
             case .joint:
-                // 辉光池没有"小保底/大保底"概念, 每个 6 星独立 50% 出限定.
-                // 显示"非常驻六星率"(限定 / 总 6 星), 跟武器池 UP 率同语义.
-                // 无样本时显示占位符 "—" 而非 0.0%, 与"真实不歪率"对齐.
-                let jointUpRate = stats.count_all > 0
-                    ? Double(stats.win_5050) / Double(stats.count_all)
-                    : 0
+                // 辉光池没有"小保底/大保底"概念, 每个 6 星独立 50% 出限定 (无硬保底).
+                // "非常驻六星率" = 限定 / (限定 + 常驻 6 星)。直接复用 C++ 端算好的
+                // win_rate_5050 (= win_5050/(win_5050+lose_5050)), 与角色/武器口径统一、
+                // 单一来源。辉光无强制剔除, 故数值上 == win_5050/count_all, 但读 C++ 更稳。
+                // 无样本时 C++ 端为 sentinel -1, 显示占位符 "—".
                 DetailRow(
                     label: "非常驻六星率",
-                    value: stats.count_all > 0
-                        ? String(format: "%.1f%%", jointUpRate * 100)
+                    value: stats.win_rate_5050 >= 0
+                        ? String(format: "%.1f%%", stats.win_rate_5050 * 100)
                         : "—",
                     hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) 限定 / \(stats.lose_5050) 常驻"
                 )
             case .weapon:
-                // 无样本时显示占位符 "—", 与"真实不歪率" / 辉光"非常驻六星率"对齐.
-                let upRate = stats.count_all > 0
-                    ? Double(stats.win_5050) / Double(stats.count_all)
-                    : 0
+                // 6 星 UP 率 = 真实掷中限定 / (限定 + 非限定 6 星)。直接复用 C++ 端算好的
+                // win_rate_5050 (= win_5050/(win_5050+lose_5050)) —— 它已把 80 抽(8 申领)
+                // 硬保底【强制】出的那发限定从分子分母里一并剔除。
+                // 【不能】用 win_5050/count_all: count_all 含那发强制限定, 会把分母撑大,
+                // UP 率系统性偏低 (本数据 21.1% vs 正确 23.5%)。无样本时为 sentinel -1。
                 DetailRow(
                     label: "6 星 UP 率",
-                    value: stats.count_all > 0
-                        ? String(format: "%.1f%%", upRate * 100)
+                    value: stats.win_rate_5050 >= 0
+                        ? String(format: "%.1f%%", stats.win_rate_5050 * 100)
                         : "—",
                     hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) UP / \(stats.lose_5050) 非 UP"
                 )

@@ -3,3 +3,4 @@
 //
 
 #import "AnalyzerWrapper.h"
+#import "FetchSession.h"

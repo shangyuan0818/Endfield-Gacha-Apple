@@ -19,13 +19,15 @@
 #if os(macOS)
 
 import SwiftUI
+import Foundation        // NSFileCoordinator
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    // 用户配置
-    @State private var chars: String = "骏卫,黎风,别礼,余烬,艾尔黛拉"
-    @State private var pool: String = "熔火灼痕:莱万汀,轻飘飘的信使:洁尔佩塔,热烈色彩:伊冯,河流的女儿:汤汤,狼珀:洛茜,春雷动，万物生:庄方宜"
-    @State private var weps: String = "宏愿,不知归,黯色火炬,扶摇,热熔切割器,显赫声名,白夜新星,大雷斑,赫拉芬格,典范,昔日精品,破碎君王,J.E.T.,骁勇,负山,同类相食,楔子,领航者,骑士精神,遗忘,爆破单元,作品：蚀迹,沧溟星梦,光荣记忆,望乡"
+    // 用户配置:接入跨平台共享 AppConfig,与 iOS 共用同一份默认值/状态。
+    //   注入点见 Endfield_GachaApp.swift 的 .environment(config)。
+    //   注意:本期 macOS 不做持久化 —— 这里的改动只在本次运行有效,
+    //   关闭窗口 / 重启 App 后恢复 AppConfig 的默认值 (与改造前 @State 的行为一致)。
+    @Environment(AppConfig.self) private var config
 
     // 分析状态
     @State private var outputText: String = "将 UIGF JSON 文件拖入窗口,或点击工具栏「拉取数据」按钮从 URL 直接抓取"
@@ -37,6 +39,9 @@ struct ContentView: View {
     @State private var showFetcher: Bool = false
 
     var body: some View {
+        // @Bindable 才能把 @Observable 的字段绑成 $cfg.chars (与 iOS SettingsView 一致)
+        @Bindable var cfg = config
+
         // 整个主区域用 ScrollView 包裹:小屏 MacBook 缩小窗口时
         // 武器卡池/底部图表会被 Dock 或屏幕底端遮挡,这里让用户能滚动查看。
         // 注意:
@@ -51,9 +56,9 @@ struct ContentView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
 
-                    LabeledRow(label: "常驻六星角色", text: $chars)
-                    LabeledRow(label: "当期 UP 角色", text: $pool)
-                    LabeledRow(label: "常驻六星武器", text: $weps)
+                    LabeledRow(label: "常驻六星角色", text: $cfg.chars)
+                    LabeledRow(label: "当期 UP 角色", text: $cfg.pool)
+                    LabeledRow(label: "常驻六星武器", text: $cfg.weps)
                 }
                 .padding(14)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
@@ -139,17 +144,17 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $isHovering) { providers in
             // 防御:正在处理时拒绝新拖入,避免双开 worker
             guard !isProcessing, let provider = providers.first else { return false }
-            let capturedChars = chars
-            let capturedPool  = pool
-            let capturedWeps  = weps
+            let capturedChars = config.chars
+            let capturedPool  = config.pool
+            let capturedWeps  = config.weps
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let path = url?.path else { return }
+                guard let url else { return }
                 // loadObject 回调可能在任意线程,统一切回主线程
                 DispatchQueue.main.async {
                     self.isProcessing = true
                     self.analysis = nil
                     self.outputText = "正在读取并解析文件..."
-                    self.runAnalysis(path: path,
+                    self.runAnalysis(url: url,
                                      chars: capturedChars,
                                      pool: capturedPool,
                                      weps: capturedWeps)
@@ -159,27 +164,49 @@ struct ContentView: View {
         }
         // 拉取弹窗
         .sheet(isPresented: $showFetcher) {
-            FetcherView { resultPath in
+            FetcherView { resultURL in
                 // 用户点击"完成",FetcherView 关闭后自动触发分析
                 showFetcher = false
-                if let path = resultPath {
+                if let url = resultURL {
                     self.isProcessing = true
                     self.analysis = nil
-                    self.outputText = "拉取完成,正在分析 \(path)..."
-                    runAnalysis(path: path, chars: chars, pool: pool, weps: weps)
+                    self.outputText = "拉取完成,正在分析 \(url.path)..."
+                    runAnalysis(url: url, chars: config.chars, pool: config.pool, weps: config.weps)
                 }
             }
         }
     }
 
-    // 后台线程跑 C++ 分析
-    private func runAnalysis(path: String, chars: String, pool: String, weps: String) {
+    // 后台线程跑 C++ 分析。
+    // 接收 URL 而非 path: 沙盒分发时, 拖入/保存面板给的 URL 需安全作用域才能读 (与 iOS 一致);
+    //   非沙盒分发时 startAccessingSecurityScopedResource() 返回 false, 这段即 no-op。
+    //   注意异步: 作用域要在读取(analyze)期间持有, 故读完才 stop, 不能用 defer。
+    private func runAnalysis(url: URL, chars: String, pool: String, weps: String) {
+        let needsAccess = url.startAccessingSecurityScopedResource()
         DispatchQueue.global(qos: .userInitiated).async {
-            let bundle = AnalyzerBridge.analyze(filePath: path,
+            // 协调读取 (与 iOS 一致): 与协调写互斥, iCloud / 第三方 File Provider 更稳。
+            //   analyze 内部仍 mmap coordinatedURL.path —— 不改用 Swift 读取; 协调开销不在解析热路径。
+            //   .withoutChanges: 纯读取, 不触发写方先保存。
+            let coordinator = NSFileCoordinator()
+            var coordError: NSError?
+            var bundle: AnalysisBundleResult?
+            coordinator.coordinate(readingItemAt: url,
+                                    options: .withoutChanges,
+                                    error: &coordError) { coordinatedURL in
+                bundle = AnalyzerBridge.analyze(filePath: coordinatedURL.path,
                                                 chars: chars, poolMap: pool, weapons: weps)
+            }
+            if needsAccess { url.stopAccessingSecurityScopedResource() }
+
+            // 协调失败兜底 (极少见: 文件被删 / 权限丢失 / 无法授予协调访问)。
+            let result = bundle ?? AnalysisBundleResult(
+                outputText: coordError.map { "文件协调读取失败: \($0.localizedDescription)" }
+                    ?? "分析失败 (未知错误)",
+                charts: nil
+            )
             DispatchQueue.main.async {
-                self.outputText = bundle.outputText
-                self.analysis = bundle.charts
+                self.outputText = result.outputText
+                self.analysis = result.charts
                 self.isProcessing = false
             }
         }

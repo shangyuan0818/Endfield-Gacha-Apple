@@ -101,13 +101,19 @@ private struct TheoryCDF {
     }()
 
     // ===== 角色当期 UP =====
-    // v0.1.1.1: 升级为真实双状态前向迭代 D[h][s]
-    //   h ∈ {0, 1}: 是否处于大保底 (0=未触发, 1=已触发, 下次出 6 星必 UP)
-    //   s ∈ [0, 80): 当前水位
-    //   n=30 处展开 11 次免费十连判定 (1 本体抽 + 10 免费抽水位停)
-    //   第 120 抽硬保底强制全部毕业
-    // 旧版 v0.1.1 用单维 D[s] + p_hit * 0.5 简化, E[首UP] ≈ 81.4 (偏差 7 抽);
-    // v0.1.1.1 改真实双状态, E[首UP] ≈ 74.16, 与社区数据 74.33 对齐.
+    // 修正 (与 C++ AnalyzerWrapper.mm 的角色 UP CDF 完全一致, 消除图表理论曲线与文本统计/
+    //   K-S 检验的分布漂移): 终末地特许寻访【没有原神/米池式大保底】—— 小保底歪了之后,
+    //   下一次出六星仍是独立 50/50, 可以连续歪多次。唯一兜底是【第 120 抽硬保底】(本期累计
+    //   120 抽必出 UP), 每期独立、不继承。
+    //   => 状态退化为单维 D[s] (与武器/辉光池同构), n=120 强制所有"尚未出 UP"的存活者毕业。
+    //   D[s]: 水位 s ∈ [0,80), 概率质量 = "尚未出 UP"的人群。
+    //   每抽: 不出货 → D[s]×(1-ph) 推进到 s+1; 出货(独立 50/50) → 50% 毕业(出 UP),
+    //         50% 歪(水位归 0, 仍未出 UP)。n=30: 1 本体抽(推进水位) + 10 免费抽(水位停)。
+    //
+    // 历史: 旧版 v0.1.1.1 误用"歪→下次必中"双状态 D[h][s], E[首UP] ≈ 74.16, 与社区 74.33
+    //   看似吻合 —— 实则 74.33 是【净成本】(扣前 5 抽免费), 原始抽真值 = 74.33 + 5 ≈ 79.29;
+    //   74.16 只是数值巧合, 掩盖了"终末地根本没有该大保底"这个 bug。本版改回单维 + 120 硬保底,
+    //   E[首UP] = 79.29 原始抽 (CDF@80 ≈ 57.59%, @100 ≈ 62.80%, @119 ≈ 67.24%)。
     static let charPoolUP: [Double] = {
         let hardCap = 120
         let maxSoftPity = 80
@@ -119,46 +125,15 @@ private struct TheoryCDF {
             else             { return 1.0 }
         }
 
-        // D[h][s]: h=0/1 是否触发大保底; s 是水位
-        var D = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
-                           count: 2)
-        D[0][0] = 1.0
+        // 单维状态: D[s] = 水位 s 且"尚未出 UP"的概率 (无大保底标志, 每次出货独立 50/50)
+        var D = [Double](repeating: 0, count: maxSoftPity)
+        D[0] = 1.0
         var cum = 0.0
-
-        // 一抽: src → dst, 累加毕业概率 p_finish, waterStops 决定不出货时水位停 vs 推进
-        func stepOnePull(src: [[Double]], dst: inout [[Double]],
-                         pFinish: inout Double, waterStops: Bool) {
-            for hh in 0..<2 {
-                for s in 0..<maxSoftPity where src[hh][s] > 0 {
-                    let prob = src[hh][s]
-                    let ph = h(s + 1)
-                    // 不出 6 星: 水位推进 (或停)
-                    if waterStops {
-                        dst[hh][s] += prob * (1 - ph)
-                    } else if s + 1 < maxSoftPity {
-                        dst[hh][s + 1] += prob * (1 - ph)
-                    }
-                    // 出 6 星
-                    if hh == 1 {
-                        // 大保底: 必 UP, 毕业
-                        pFinish += prob * ph
-                    } else {
-                        // 非大保底: 50% UP 毕业, 50% 非 UP 进入大保底
-                        pFinish += prob * ph * 0.5
-                        if waterStops {
-                            dst[1][s] += prob * ph * 0.5
-                        } else {
-                            dst[1][0] += prob * ph * 0.5
-                        }
-                    }
-                }
-            }
-        }
 
         for n in 1...hardCap {
             if n == hardCap {
-                // 120 硬保底: 所有未毕业概率强制毕业
-                let alive = D.flatMap { $0 }.reduce(0, +)
+                // 120 硬保底: 所有"尚未出 UP"的存活者强制毕业
+                let alive = D.reduce(0, +)
                 cum += alive
                 cdf[n] = min(1.0, cum)
                 for k in (n + 1)...(hardCap + 1) { cdf[k] = 1.0 }
@@ -166,25 +141,37 @@ private struct TheoryCDF {
             }
 
             if n == 30 {
-                // 1 本体抽 + 10 免费抽
-                var stateA = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
-                                        count: 2)
+                // 1 本体抽 (推进水位) + 10 免费抽 (水位停)
+                var stateA = [Double](repeating: 0, count: maxSoftPity)
                 var pFinish = 0.0
-                stepOnePull(src: D, dst: &stateA, pFinish: &pFinish, waterStops: false)
+                for s in 0..<maxSoftPity where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoftPity { stateA[s + 1] += D[s] * (1 - ph) }
+                    pFinish   += D[s] * ph * 0.5   // 毕业 (出 UP)
+                    stateA[0] += D[s] * ph * 0.5   // 歪, 水位归 0 (本体抽)
+                }
                 for _ in 0..<10 {
-                    var stateB = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
-                                            count: 2)
-                    stepOnePull(src: stateA, dst: &stateB, pFinish: &pFinish, waterStops: true)
+                    var stateB = [Double](repeating: 0, count: maxSoftPity)
+                    for s in 0..<maxSoftPity where stateA[s] > 0 {
+                        let ph = h(s + 1)
+                        stateB[s] += stateA[s] * (1 - ph)   // 不出货, 水位停
+                        pFinish   += stateA[s] * ph * 0.5   // 毕业 (出 UP)
+                        stateB[s] += stateA[s] * ph * 0.5   // 歪, 水位停 (免费抽)
+                    }
                     stateA = stateB
                 }
                 cum += pFinish
                 cdf[n] = min(1.0, cum)
                 D = stateA
             } else {
-                var newD = [[Double]](repeating: [Double](repeating: 0, count: maxSoftPity),
-                                      count: 2)
+                var newD = [Double](repeating: 0, count: maxSoftPity)
                 var pFinish = 0.0
-                stepOnePull(src: D, dst: &newD, pFinish: &pFinish, waterStops: false)
+                for s in 0..<maxSoftPity where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoftPity { newD[s + 1] += D[s] * (1 - ph) }
+                    pFinish += D[s] * ph * 0.5   // 毕业 (出 UP)
+                    newD[0] += D[s] * ph * 0.5   // 歪, 水位归 0
+                }
                 cum += pFinish
                 cdf[n] = min(1.0, cum)
                 D = newD

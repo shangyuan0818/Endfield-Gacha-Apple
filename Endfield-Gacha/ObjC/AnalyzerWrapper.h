@@ -1,9 +1,11 @@
+//
 //  AnalyzerWrapper.h
 //  Endfield-Gacha
 //
 //  ObjC 接口层:C++ 核心运行在 .mm 里,结果包成 NSObject 传给 Swift。
 //  Swift 只看到这个头文件,不直接接触任何 C++ 类型。
 //  在 Bridging Header 里 #import "AnalyzerWrapper.h"
+//
 
 #pragma once
 #import <Foundation/Foundation.h>
@@ -63,13 +65,8 @@ NS_ASSUME_NONNULL_BEGIN
                             weapons:(NSString*)weapons;
 @end
 
-@interface GachaFetcherWrapper : NSObject
-+ (void)fetchAllPoolsFromURL:(NSString*)url
-                existingFile:(NSString*)existingFile
-               progressBlock:(void(^)(NSString* _Nullable message))progressBlock
-             completionBlock:(void(^)(BOOL ok, NSInteger newCount, NSInteger total,
-                                     NSString* _Nullable outputPath,
-                                     NSString* _Nullable errorMessage))completionBlock;
-@end
+// 注: GachaFetcherWrapper 已废弃 (AsyncFetch-Design v5)。
+// 同步 pthread 拉取已拆为 [C++ 状态机 FetchSession] + [Swift 异步编排 GachaFetchCoordinator],
+// 接口见 FetchSession.h。
 
 NS_ASSUME_NONNULL_END

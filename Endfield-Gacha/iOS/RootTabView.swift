@@ -5,7 +5,7 @@
 //  根 Tab 容器:分析 / 拉取 / 设置。
 //
 //  关键交互:
-//    - 拉取 Tab 完成后,通过 pendingAnalysisPath 把生成的 JSON 路径传给分析 Tab,
+//    - 拉取 Tab 完成后,通过 pendingAnalysisURL 把生成的 JSON URL 传给分析 Tab,
 //      并自动切回分析 Tab 触发分析。
 //
 //  形态适配 (iOS 18+ TabView 体系):
@@ -25,9 +25,10 @@
 import SwiftUI
 
 struct RootTabView: View {
-    /// 待分析的文件路径。拉取 Tab 完成后会写入,
+    /// 待分析的文件 URL。拉取 Tab 完成后会写入,
     /// 分析 Tab 通过 .onChange 监听到后启动分析并消费(置 nil)。
-    @State private var pendingAnalysisPath: String? = nil
+    /// 用 URL (而非 path String): 保留外部文件 (iCloud / 第三方 File Provider) 的安全作用域访问语义。
+    @State private var pendingAnalysisURL: URL? = nil
 
     /// 当前选中 Tab。0=分析 1=拉取 2=设置。
     @State private var selectedTab: Int = 0
@@ -44,7 +45,7 @@ struct RootTabView: View {
             // 替代旧 .tabItem 写法,与 sidebarAdaptable 协作良好,
             // 在 sidebar 形态下也能正确显示图标 + 标题。
             Tab("分析", systemImage: "chart.bar.xaxis", value: 0) {
-                AnalysisView_iOS(pendingPath: $pendingAnalysisPath)
+                AnalysisView_iOS(pendingURL: $pendingAnalysisURL)
             }
             // customizationID 是 TabViewCustomization 的稳定标识,
             // 必须给每个 Tab 设置(否则用户的顺序/隐藏状态无法持久化)。
@@ -52,9 +53,9 @@ struct RootTabView: View {
             .customizationID("endfield.tab.analysis")
 
             Tab("拉取", systemImage: "arrow.down.circle", value: 1) {
-                FetcherView_iOS { path in
+                FetcherView_iOS { url in
                     // 拉取并保存完成后:写 pending,切回分析 Tab
-                    pendingAnalysisPath = path
+                    pendingAnalysisURL = url
                     selectedTab = 0
                 }
             }

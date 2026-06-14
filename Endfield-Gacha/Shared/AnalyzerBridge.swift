@@ -145,21 +145,8 @@ enum AnalyzerBridge {
     }
 }
 
-// MARK: - FetcherBridge
-enum FetcherBridge {
-    static func fetchAll(
-        url: String,
-        existingFile: String,
-        progress: @escaping @Sendable (String) -> Void,
-        completion: @escaping @Sendable (_ ok: Bool, _ newCount: Int, _ total: Int, _ outputPath: String, _ errMsg: String) -> Void
-    ) {
-        GachaFetcherWrapper.fetchAllPools(
-            fromURL: url,
-            existingFile: existingFile,
-            progressBlock: { msg in progress(msg ?? "") },
-            completionBlock: { success, nc, tot, path, err in
-                completion(success, nc, tot, path ?? "", err ?? "")
-            }
-        )
-    }
-}
+// MARK: - FetcherBridge (已废弃)
+//
+// 旧的同步 completion-handler 桥 (GachaFetcherWrapper.fetchAllPools) 已移除。
+// 拉取改用 AsyncFetch-Design v5 的 GachaFetchCoordinator (Swift async):
+// View 在 Task 里直接 `try await coordinator.run(...)`, 见 FetcherView / FetcherView_iOS。

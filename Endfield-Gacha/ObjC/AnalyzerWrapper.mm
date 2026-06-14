@@ -1,3 +1,4 @@
+//
 //  AnalyzerWrapper.mm
 //  Endfield-Gacha
 //
@@ -5,6 +6,7 @@
 //  C++ 核心算法(从 Windows gui.cpp 1:1 迁移)在匿名 namespace 里,
 //  ObjC 包装把结果转成 NSObject 属性传给 Swift。
 //  Swift 侧没有任何 C++ 类型泄漏。
+//
 
 #import "AnalyzerWrapper.h"
 #include <pthread.h>
@@ -16,12 +18,15 @@
 #include <charconv>
 #include <memory_resource>
 #include <ranges>
+#include <span>           // v0.1.3.3: 理论 CDF 表改用 std::span 传参
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include <memory>       // std::make_unique_for_overwrite (C++20) —— worker 的 2MB PMR arena 用它在堆上不清零分配
+#include <mutex>        // std::once_flag / std::call_once —— CDF 表只初始化一次, 防并发数据竞态
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -240,8 +245,11 @@ struct PullBucket {
     size_t size() const { return rank_types.size(); }
 };
 
-// ------ StatsAccumulator (cache-line 对齐,避免与其他热数据共享 cacheline) ------
-struct alignas(128) StatsAccumulator {
+// ------ StatsAccumulator ------
+// 不做 cache-line 对齐: Calculate() 里三个池是【依次】跑的, acc 是单线程局部变量, 不存在多核
+// 并发写相邻 accumulator 的 false sharing 场景 —— 旧版 alignas(128) 在此是无操作, 留着只会
+// 误导维护者以为有并发。将来若真改成多线程分片归约, 再按实际 cache-line 布局补 padding 即可。
+struct StatsAccumulator {
     std::array<int,260> freq_all{}, freq_up{};
     long long sum_all=0, sum_sq_all=0, sum_up=0, sum_sq_up=0, sum_win=0;
     int count_all=0, count_up=0, count_win=0, max_pity_all=0, max_pity_up=0;
@@ -266,10 +274,13 @@ double g_cdf_char_up[122] = {};
 double g_cdf_wep_up[81]   = {};
 double g_cdf_joint_up[242] = {};
 double g_joint_tail_mean_excess = 0.0;
-bool   g_cdf_init = false;
+std::once_flag g_cdf_once;   // 保证 CDF 表只初始化一次, 即使多个分析任务并发进入桥接接口
 
-void InitCDFTables() {
-    if (g_cdf_init) return;
+// 真正的表构造逻辑; 只经下方 InitCDFTables() 通过 std::call_once 调用一次, 避免并发写全局数组。
+static void InitCDFTables_impl() {
+    // ---- 角色池 (综合 6 星 CDF) ----
+    // 含 k=30 特殊十连的 11 次合并判定: hazard p —— k=30 用 1-(1-0.008)^11 ≈ 0.08462;
+    //   k≤65 为 0.008; k=66..79 每抽 +0.05 软保底; k=80 硬保底必出。
     double surv=1.0;
     for(int i=1;i<=80;++i){
         double p = (i==30) ? 1.0 - std::pow(1.0-0.008, 11)
@@ -281,23 +292,46 @@ void InitCDFTables() {
         surv *= (1.0-p);
     }
     g_cdf_char[81]=1.0;
+
+    // ---- 武器池 (综合 6 星 CDF, “距上次 6 星的抽数 x” 分布) ----
+    // 物理模型:
+    //   1) 前 3 个十连 (x=1..30) 每抽 4% 独立: P(x=k) = 0.96^(k-1) × 0.04
+    //   2) 前 30 抽全未出 (概率 0.96^30), 第 4 个十连保底必出 ≥1 个 6 星; 抽内按
+    //      “条件伯努利”展开: 设 Y=本十连内首次命中位置, 无保底 P(Y=j)=0.96^(j-1)×0.04,
+    //      P(Y=∞)=0.96^10; 保底强制排除 Y=∞ → P(Y=j|Y≤10)=0.96^(j-1)×0.04 / (1-0.96^10)。
+    //   合起来: k=1..30  P_pdf[k]=0.96^(k-1)×0.04;
+    //           k=31..40 P_pdf[k]=0.96^30 × [0.96^(k-31)×0.04 / (1-0.96^10)]。
+    //   验证 ∫PDF = (1-0.96^30) + 0.96^30×1 = 1 ✓
+    //   (简写: bh/bm = 命中/未命中 0.04/0.96, sw = 累计存活, ls = 保底十连内存活,
+    //    norm = 1-0.96^10 ≈ 0.3352 为保底十连条件分布归一化常数。)
     {
         double bh=0.04, bm=0.96, sw=1.0;
+        // 前 30 抽: 每抽 4% 独立
         for(int k=1;k<=30;++k){g_cdf_wep[k]=g_cdf_wep[k-1]+sw*bh; sw*=bm;}
+        // 第 31~40 抽: 保底十连内“条件伯努利”分布 (sw 此时 = 0.96^30 ≈ 0.2939)
         double norm=1.0-std::pow(bm,10), ls=1.0;
         for(int k=31;k<=40;++k){g_cdf_wep[k]=g_cdf_wep[k-1]+sw*(ls*bh/norm); ls*=bm;}
+        // g_cdf_wep[40] ≈ 1.0
     }
 
-    // ---- 角色 UP CDF (v0.1.1.1: 真实双状态前向迭代, 替换原 v0.1.1 的 50/50 简化) ----
+    // ---- 角色 UP CDF (修正: 删除 v0.1.1.1 的“歪→下次必中”双状态大保底) ----
     //
-    // 真实双状态模型: D[s][h], h ∈ {0, 1} 表示是否处于 "大保底" 状态.
-    //   h=0: 未触发大保底, 出 6 星后 50% UP / 50% 进入 h=1
-    //   h=1: 已触发大保底, 出 6 星必为 UP
-    // n=30 处展开 11 次免费十连判定 (1 本体抽推进水位 + 10 次免费抽水位停).
-    // 第 120 抽硬保底强制全部毕业.
+    // 真实模型: 终末地特许寻访【没有原神/米池式大保底】—— 小保底歪了之后, 下一次出六星
+    //   仍是独立 50/50, 可以连续歪多次。唯一的 UP 兜底是【120 抽硬保底】(本期累计 120
+    //   抽必出 UP), 每期独立、不继承。经联网核实确认 (官方机制说明 + 社区实测)。
+    //   => 状态退化为单维 D[s] (与辉光池同构), 唯一差别是本池在 n=120 强制所有“尚未出
+    //      UP”的存活者毕业。
+    //   D[s]: 水位 s ∈ [0,80) = 距上次出 6 星的抽数, 概率质量 = “尚未出 UP” 的人群。
+    //   每抽: 不出货 → D[s]×(1-ph) 推进到 s+1; 出货(独立 50/50) → 50% 毕业(出 UP),
+    //         50% 歪(水位归 0, 仍未出 UP)。
+    //   n=30: 展开 11 次判定 (本体抽推进水位; 免费十连水位停, 出货不重置水位)。
+    //   n=120: 硬保底, 所有存活者强制出 UP。
     //
-    // 历史: v0.1.1 用单维 D[s] + p_hit * 0.5 简化模型, E[首 UP] ≈ 81.4 (偏差 7 抽),
-    //       v0.1.1.1 改真实双状态, E[首 UP] ≈ 74.16, 与社区数据 74.33 对齐.
+    // 历史: v0.1.1 单维 50/50 (无 120 硬保底), E[首 UP] ≈ 81.4;
+    //       v0.1.1.1 误加“歪→下次必中”双状态 D[s][h], E[首 UP] ≈ 74.16, 当时以为与社区
+    //         74.33 对齐 —— 实则 74.33 是【净成本】(扣前 5 抽免费), 原始抽真值 = 74.33+5
+    //         ≈ 79.29; 74.16 只是数值巧合, 掩盖了“终末地根本没有该大保底”这个 bug;
+    //       本版改回单维 + 120 硬保底, E[首 UP] = 79.29 原始抽。
     {
         constexpr int hard_cap = 120;
         constexpr int max_soft = 80;
@@ -306,73 +340,57 @@ void InitCDFTables() {
             if (k <= 79) return 0.058 + (k - 66) * 0.05;
             return 1.0;
         };
-        // D[h][s]: h=0 未触发大保底, h=1 已触发. 水位 s ∈ [0, 80)
-        std::array<std::array<double, max_soft>, 2> D{};
-        D[0][0] = 1.0;
+        // 单维状态: D[s] = 水位 s 且“尚未出 UP”的概率 (无大保底标志, 每次出货独立 50/50)
+        std::array<double, max_soft> D{};
+        D[0] = 1.0;
         double cum = 0.0;
-
-        auto stepOnePull = [&](std::array<std::array<double, max_soft>, 2>& src,
-                               std::array<std::array<double, max_soft>, 2>& dst,
-                               double& p_finish,
-                               bool waterStops /* 免费抽水位停 */) {
-            for (int hh = 0; hh < 2; ++hh) {
-                for (int s = 0; s < max_soft; ++s) {
-                    if (src[hh][s] == 0) continue;
-                    double prob = src[hh][s];
-                    double ph = h_char(s + 1);
-                    // 不出 6 星: 水位推进 (或停)
-                    if (waterStops) {
-                        dst[hh][s] += prob * (1.0 - ph);
-                    } else if (s + 1 < max_soft) {
-                        dst[hh][s + 1] += prob * (1.0 - ph);
-                    }
-                    // 出 6 星
-                    if (hh == 1) {
-                        // 大保底: 必 UP, 毕业
-                        p_finish += prob * ph;
-                    } else {
-                        // 非大保底: 50% UP 毕业, 50% 非 UP 进入大保底
-                        p_finish += prob * ph * 0.5;
-                        if (waterStops) {
-                            dst[1][s] += prob * ph * 0.5;       // 水位停 (免费抽语义)
-                        } else {
-                            dst[1][0] += prob * ph * 0.5;       // 水位归 0 (本体抽)
-                        }
-                    }
-                }
-            }
-        };
 
         for (int n = 1; n <= hard_cap; ++n) {
             if (n == hard_cap) {
-                // 120 硬保底: 所有未毕业概率强制毕业
+                // 120 硬保底: 所有“尚未出 UP”的存活者强制毕业
                 double alive = 0.0;
-                for (int hh = 0; hh < 2; ++hh)
-                    for (int s = 0; s < max_soft; ++s)
-                        alive += D[hh][s];
+                for (int s = 0; s < max_soft; ++s) alive += D[s];
                 cum += alive;
                 g_cdf_char_up[n] = std::min(1.0, cum);
                 for (int k = n + 1; k <= hard_cap + 1; ++k) g_cdf_char_up[k] = 1.0;
                 break;
             }
 
+            std::array<double, max_soft> newD{};
+            double p_finish = 0.0;
+
             if (n == 30) {
-                // 1 次本体抽 + 10 次免费抽
-                std::array<std::array<double, max_soft>, 2> stateA{};
-                double p_finish = 0.0;
-                stepOnePull(D, stateA, p_finish, /*waterStops=*/false);
+                // 1 次本体抽 (推进水位) + 10 次免费抽 (水位停)
+                std::array<double, max_soft> stateA{};
+                for (int s = 0; s < max_soft; ++s) {
+                    if (D[s] == 0) continue;
+                    double ph = h_char(s + 1);
+                    if (s + 1 < max_soft) stateA[s + 1] += D[s] * (1.0 - ph);
+                    p_finish  += D[s] * ph * 0.5;   // 毕业 (出 UP)
+                    stateA[0] += D[s] * ph * 0.5;   // 歪, 水位归 0 (本体抽), 仍未出 UP
+                }
                 for (int free_step = 0; free_step < 10; ++free_step) {
-                    std::array<std::array<double, max_soft>, 2> stateB{};
-                    stepOnePull(stateA, stateB, p_finish, /*waterStops=*/true);
+                    std::array<double, max_soft> stateB{};
+                    for (int s = 0; s < max_soft; ++s) {
+                        if (stateA[s] == 0) continue;
+                        double ph = h_char(s + 1);
+                        stateB[s] += stateA[s] * (1.0 - ph);   // 不出货, 水位停
+                        p_finish  += stateA[s] * ph * 0.5;     // 毕业 (出 UP)
+                        stateB[s] += stateA[s] * ph * 0.5;     // 歪, 水位停 (免费抽)
+                    }
                     stateA = stateB;
                 }
                 cum += p_finish;
                 g_cdf_char_up[n] = std::min(1.0, cum);
                 D = stateA;
             } else {
-                std::array<std::array<double, max_soft>, 2> newD{};
-                double p_finish = 0.0;
-                stepOnePull(D, newD, p_finish, /*waterStops=*/false);
+                for (int s = 0; s < max_soft; ++s) {
+                    if (D[s] == 0) continue;
+                    double ph = h_char(s + 1);
+                    if (s + 1 < max_soft) newD[s + 1] += D[s] * (1.0 - ph);
+                    p_finish += D[s] * ph * 0.5;   // 毕业 (出 UP)
+                    newD[0]  += D[s] * ph * 0.5;   // 歪, 水位归 0, 仍未出 UP
+                }
                 cum += p_finish;
                 g_cdf_char_up[n] = std::min(1.0, cum);
                 D = newD;
@@ -380,9 +398,15 @@ void InitCDFTables() {
         }
     }
 
-    // ---- 武器 UP CDF (4×8 状态机) ----
-    // ns ∈ [0,3]: 已连续多少 10-pull 没出 6 星
-    // nf ∈ [0,7]: 已连续多少 10-pull 没出 featured
+    // ---- 武器 UP CDF (g_cdf_wep_up[0..80], Reddit “First Featured Weapon Acquisition” Step 4) ----
+    // 4×8 状态机:
+    //   ns ∈ [0,3]: 已连续多少 10-pull (申领) 没出 6 星 (ns==3 → 第 4 申领触发 6 星保底)
+    //   nf ∈ [0,7]: 已连续多少 10-pull 没出 featured (nf==7 → 第 8 申领触发 featured 硬保底)
+    //   s = 1 - 0.99^10 ≈ 0.0956   (一次十连含 ≥1 个 featured 的概率)
+    //   u = 0.99^10 - 0.96^10 ≈ 0.2395  (无 featured 但有非 featured 6 星)
+    //   v = 0.96^10 ≈ 0.6648       (无 6 星)
+    //   s_pity = 1 - 0.75 × 0.99^9 ≈ 0.3149  (6 星 pity 拨中 featured 的条件概率)
+    // CDF 展开成单抽索引: 只在 10 倍数边界跳变, 其它点平坦 (拨内不出货)。
     {
         const double s = 1.0 - std::pow(0.99, 10);
         const double u = std::pow(0.99, 10) - std::pow(0.96, 10);
@@ -551,13 +575,19 @@ void InitCDFTables() {
             // 预期值: g_joint_tail_mean_excess ≈ 84.37 抽
         }
     }
+}
 
-    g_cdf_init = true;
+// 公开入口: 线程安全, 多次/并发调用只会真正初始化一次 (std::call_once)。
+void InitCDFTables() {
+    std::call_once(g_cdf_once, InitCDFTables_impl);
 }
 
 // ------ KS 检验 ------
 // 修复:freq 的合法索引是 [0, 259];max_pity 必须 clamp 否则越界读
-double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,const double* cdf,int cdf_len){
+double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,std::span<const double> cdf){
+    // v0.1.3.3: "裸指针 + 长度"两个散参 → std::span (工程 C++23)。长度随表走,
+    // 调用方不可能再把表和长度传错配对; 函数体保留局部 cdf_len, 下方逻辑零改动。
+    const int cdf_len = (int)cdf.size();
     if(!n) return 0.0;
     if(max_pity > 259) max_pity = 259;        // 防御性 clamp
     // v0.1.2.2: 找到 CDF 表的"有效末端" last_valid (饱和到 1 或单调性破坏前的最后一格).
@@ -630,10 +660,20 @@ struct StatsResult {
 //   - 赠送出货不重置玩家本体的 cur_pity (按"独立通道"语义)
 //   - 仍计入 count_all / count_up / win_5050 / lose_5050,因为这是真实出货
 //
+// win_5050 / lose_5050 / avg_win 的“UP 判定”语义 (三池不同):
+//   - 角色池 (Special): 每个 6 星独立 50/50, 无大保底; 唯一兜底 120 抽硬保底 (每期独立、
+//             不继承)。win_5050=真实掷中 UP 数 (剔除 120 强制), lose=非 UP 数, avg_win 有义。
+//   - 武器池 (Weapon):  每个 6 星独立判定 UP (条件率 25%); 唯一兜底 80 抽(8 申领)限定硬保底
+//             (40 小保底 + 80 硬保底每期独立重算、均不继承)。win_5050=真实掷中限定数
+//             (剔除 80 强制), lose=非限定 6 星数; avg_win 对武器池无定义, 保持 -1。
+//   - 辉光庆典 (Joint): 4 个 6 星均匀 (2 限定 + 2 常驻), P(限定|6星)=50%, 无大保底/无硬保底。
+//             “UP”= 不在常驻名单 = 真·限定。综合 CDF 复用 g_cdf_char, 限定 CDF 用专建
+//             g_cdf_joint_up (无 120 硬保底, 不复用已加硬保底的 g_cdf_char_up)。
+//
 // v0.1.2.0 加 isJoint 参数:
 //   - 辉光池没有"小保底"概念 (每个 6 星独立 50% 出限定),
 //     win_5050 / lose_5050 按"每个 6 星是不是限定"独立计数 (跟武器池一样).
-//   - 也不维护 had_non_up 状态.
+//   - 三池均无“歪→下次必中”大保底 (had_non_up 逻辑已在 v0.1.x 修正中删除).
 //   - UP 判定走 standard_names 排除法 (pool_map 为空).
 StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     const std::unordered_set<std::string,StringHash,std::equal_to<>>& std_names,
@@ -641,11 +681,31 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
 {
     StatsAccumulator acc;
     int cur_pity=0, pity_up=0;
-    bool had_non_up=false;
+    // 卡池边界重置策略 (终末地三池各不同 —— 联网核实 + 数据验证):
+    //   - 特许池(Special): 仅 120 硬保底每期重置 (pity_up); 80 小保底【继承】(cur_pity 不重置)
+    //   - 武器池(Weapon):  40 小保底 + 80 硬保底【都】每期重置 (cur_pity 与 pity_up 都重置, 均不继承)
+    //   - 辉光庆典(Joint): 无硬保底, 连续累加, 不按期重置
+    //   got_up_banner: 本期是否已出过 UP/限定 (硬保底每期仅生效一次), 每期重置
+    //   hardpity_n:    硬保底强制阈值 —— 角色 120 抽; 武器 8 申领(= 第 71..80 抽强制出限定)
+    // 边界用 poolName 变化探测 (每期 pool_name 唯一; 武器记录 id 为负, 桶内按 |id| 升序 = 时间序).
+    bool got_up_banner=false;
+    const bool track_special = (!isWeapon && !isJoint);
+    const bool track_weapon  = isWeapon;
+    const bool track_banner   = (track_special || track_weapon);   // Joint 不按期重置
+    const int  hardpity_n    = isWeapon ? 71 : 120;
 
     const size_t total = bucket.size();
     for(size_t i=0; i<total; ++i){
         const bool isFree = bucket.is_free[i];
+
+        // 卡池边界探测: poolName 变化 = 进入新一期卡池.
+        //   特许池: 120 硬保底不继承 → pity_up + got_up_banner 清零; 80 小保底继承 (cur_pity 不动)
+        //   武器池: 40 + 80 都不继承 → cur_pity + pity_up + got_up_banner 全清零
+        if (track_banner && i > 0 && bucket.poolNames[i] != bucket.poolNames[i - 1]) {
+            pity_up       = 0;
+            got_up_banner = false;
+            if (track_weapon) cur_pity = 0;   // 武器 40 小保底也每期重算 (角色 80 小保底继承, 不清)
+        }
 
         // 赠送十连: 不推进保底通道
         if (!isFree) {
@@ -682,22 +742,30 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             acc.sum_up    += slot_up;
             acc.sum_sq_up += (long long)slot_up*slot_up;
 
-            if(isWeapon || isJoint){
-                // 武器池/辉光池: 每个 6 星独立 50% (joint) 或 25% (weapon) 判定
+            // 胜负统计 (修正: 终末地无“歪→下次必中”, 每个六星/六星武器都是独立判定):
+            //   - 角色池 50/50, 武器池 25% 条件率 —— 每个 UP/限定都计入“胜”, 唯一例外:
+            //     由【硬保底强制】出的那个 (本期首个 UP/限定, 且当期累计抽数已打满硬保底阈值)
+            //     不是掷硬币结果, 必须剔除 (角色 120 抽; 武器 8 申领即第 71..80 抽), 否则把
+            //     真实条件率系统性拉高 (角色>50%, 武器>25%)。
+            //   - 辉光庆典: 无硬保底, 每个限定直接计入。
+            //   - avg_win (count_win/sum_win) 仅特许池有物理含义; 武器/Joint 不累计。
+            const bool forced_by_hardpity =
+                track_banner && !got_up_banner && !isFree && pity_up >= hardpity_n;
+            if(isJoint){
                 acc.win_5050++;
-            } else if(!had_non_up){
-                // 角色 (Special) 池: 小保底"赢/输"概念
+            } else if(!forced_by_hardpity){
                 acc.win_5050++;
-                acc.count_win++;
-                acc.sum_win += slot_all;
+                if(!isWeapon){            // avg_win 仅对特许池定义
+                    acc.count_win++;
+                    acc.sum_win += slot_all;
+                }
             }
-            had_non_up=false;
-            // 赠送十连出 UP 不重置 pity_up (独立通道); 正常出 UP 重置
+            got_up_banner=true;
+            // 赠送十连出 UP 不重置 pity_up (独立通道); 正常出 UP/限定 重置
             if (!isFree) pity_up=0;
         } else {
-            if(isWeapon || isJoint)   acc.lose_5050++;
-            else if(!had_non_up)      acc.lose_5050++;
-            had_non_up=true;
+            // 非 UP/非限定六星 = 一次独立判定的“负”。终末地可连续歪多次, 全部如实计入。
+            acc.lose_5050++;
         }
         // 赠送十连出货不重置 cur_pity (独立通道); 正常出货重置
         if (!isFree) cur_pity=0;
@@ -728,9 +796,10 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
         double sd  = std::sqrt(var);
         s.cv_all   = (s.avg_all>0) ? sd/s.avg_all : 0;
         s.ci_all_err = TCritical95(acc.count_all-1) * sd / std::sqrt((double)acc.count_all);
-        const double* cdf = isWeapon ? g_cdf_wep : g_cdf_char;
-        int clen = isWeapon ? 41 : 82;
-        s.ks_d_all = ComputeKS(acc.freq_all, acc.max_pity_all, acc.count_all, cdf, clen);
+        const std::span<const double> cdf = isWeapon
+            ? std::span<const double>(g_cdf_wep)      // 41
+            : std::span<const double>(g_cdf_char);    // 82
+        s.ks_d_all = ComputeKS(acc.freq_all, acc.max_pity_all, acc.count_all, cdf);
         s.ks_is_normal = (s.ks_d_all <= 1.36/std::sqrt((double)acc.count_all));
     }
 
@@ -753,11 +822,32 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
         s.ci_up_err = TCritical95(acc.count_up-1) * std::sqrt(var) / std::sqrt((double)acc.count_up);
         // UP KS 检验: 用 g_cdf_*_up
         // v0.1.2.0: 辉光池走 g_cdf_joint_up
-        const double* cdf_up; int clen_up;
-        if (isJoint)       { cdf_up = g_cdf_joint_up; clen_up = 242; }
-        else if (isWeapon) { cdf_up = g_cdf_wep_up;   clen_up = 81;  }
-        else               { cdf_up = g_cdf_char_up;  clen_up = 122; }
-        s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up, clen_up);
+        std::span<const double> cdf_up;              // v0.1.3.3: 长度由 span 自带
+        if (isJoint)       cdf_up = g_cdf_joint_up;   // 242
+        else if (isWeapon) cdf_up = g_cdf_wep_up;     // 81
+        else               cdf_up = g_cdf_char_up;    // 122
+        if (isWeapon) {
+            // v0.1.3.3 武器 UP K-S: 先把经验 freq_up 按申领 (10 抽) 粒度向上聚合再比较。
+            // 原因: g_cdf_wep_up 的质量只在 10 倍数边界记账 (申领内平坦, 机制如此),
+            // 而经验 pity_up 记录的是申领内具体单抽落点 (自然出货 ~截断几何分布,
+            // 40/80 保底强制出货的拨内落点游戏未公开)。两条阶梯粒度不同, 逐抽比较会被
+            // "拨内错位"系统性抬高 D (落点均匀假设下渐近 ~0.37, 12 期样本伪拒绝率 ~63%)。
+            // 聚合到申领边界后, 任何拨内落点都映射到同一申领, K-S 对落点假设免疫,
+            // 伪拒绝率回到 <= 名义 5% (模拟: ~2%)。
+            // 仅 K-S 内部用聚合副本; ECDF/MRL 图与 avg_up 仍为单抽粒度, 曲线连贯不变。
+            std::array<int,260> freq_up_claim{};
+            for (int x = 1; x <= acc.max_pity_up; ++x) {
+                if (acc.freq_up[x] == 0) continue;
+                int slot = ((x + 9) / 10) * 10;   // 向上取整到申领末抽
+                if (slot > 259) slot = 259;       // 防御 (正常数据 pity_up <= 80)
+                freq_up_claim[slot] += acc.freq_up[x];
+            }
+            int max_claim = ((acc.max_pity_up + 9) / 10) * 10;
+            if (max_claim > 259) max_claim = 259;
+            s.ks_d_up = ComputeKS(freq_up_claim, max_claim, acc.count_up, cdf_up);
+        } else {
+            s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up);
+        }
         s.ks_is_normal_up = (s.ks_d_up <= 1.36/std::sqrt((double)acc.count_up));
     }
     // UP hazard 同理
@@ -821,14 +911,18 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj, const Stats
     return [NSString stringWithFormat:
         @"【角色卡池 (特许寻访)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星 (含歪) 出货平均期望:     %.2f 抽 (理论 ≈ 51.81)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
-        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 74.33)   [95%% CI: %.1f ~ %.1f]    |   真实不歪率: %.1f%% (理论 50%%) (%ld胜%ld负)\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
+        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 79.29)   [95%% CI: %.1f ~ %.1f]    |   真实不歪率: %.1f%% (理论 50%%) (%ld胜%ld负)\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
         @" ▶ 赢下小保底 (不歪) 的出货期望:     %@\n\n"
         @"【角色卡池 (辉光庆典)】 总计六星: %d | 出限定: %d%@\n"
         @" ▶ 综合六星出货平均期望:             %.2f 抽 (理论 ≈ 51.81)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
-        @" ▶ 抽到任一限定 (非常驻) 的平均期望: %.2f 抽 (理论 ≈ 103.62)  [95%% CI: %.1f ~ %.1f]    |   非常驻六星率: %.1f%% (理论 50%%) (%ld限定%ld常驻)\t[K-S 检验偏离度 D值: %.3f (%@)]\n\n"
+        @" ▶ 抽到任一限定 (非常驻) 的平均期望: %.2f 抽 (理论 ≈ 104.68)  [95%% CI: %.1f ~ %.1f]    |   非常驻六星率: %.1f%% (理论 50%%) (%ld限定%ld常驻)\t[K-S 检验偏离度 D值: %.3f (%@)]\n\n"
         @"【武器卡池 (武库申领)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星出货平均期望:             %.2f 抽 (理论 ≈ 19.17)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
-        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 81.66)   [95%% CI: %.1f ~ %.1f]    |   6 星中 UP 率: %.1f%% (理论 25%%) (%ld UP / %ld 非UP)\t[K-S 检验偏离度 D值: %.3f (%@)]",
+        // v0.1.3.3: 武器 UP 理论参考值 81.66 → 54.74。81.66 是 Reddit 原文"忽略 80 抽
+        // 硬保底"的无截断期望, 与本程序 K-S/MRL 用的含保底模型 (g_cdf_wep_up, 均值
+        // 54.737) 自相矛盾 —— 经验均值必然 <=80, 应与 54.74 对照。另: 经验 pity_up 记
+        // 申领内单抽落点, 实测均值常比按申领末记账的 54.74 再低 3~7 抽 (落点未公开)。
+        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 54.74)   [95%% CI: %.1f ~ %.1f]    |   6 星中 UP 率: %.1f%% (理论 25%%) (%ld UP / %ld 非UP)\t[K-S 检验偏离度 D值: %.3f (%@)]",
         sc.count_all, sc.count_up, pendStr(sc.censored_pity_all,sc.censored_pity_up),
         sc.avg_all, std::max(1.0, sc.avg_all-sc.ci_all_err), sc.avg_all+sc.ci_all_err,
             sc.cv_all*100, sc.ks_d_all, ksLabel(sc.count_all, sc.ks_is_normal),
@@ -866,15 +960,36 @@ struct AnalyzeThreadContext {
 };
 
 // -----------------------------------------------------------
-// 核心分析任务 (运行在独立 pthread 内,享有 4MB 大栈)
+// 核心分析任务 (由调用方在后台队列直接同步调用; arena 在堆上, 用调用方线程栈即可)
+// 形参仍是 void*, 保留旧 pthread 入口签名以便最小改动。
 // -----------------------------------------------------------
 void* analyze_worker(void* arg) {
     @autoreleasepool {
         AnalyzeThreadContext* ctx = (AnalyzeThreadContext*)arg;
 
-        // PMR 栈池:2MB 在 4MB 栈中足够安全
-        std::array<std::byte, 2 * 1024 * 1024> stackBuffer;
-        std::pmr::monotonic_buffer_resource pool(stackBuffer.data(), stackBuffer.size());
+        // PMR: 2MB 单调缓冲池 (monotonic_buffer_resource)。v0.1.3.2 起【改放堆上】(此前在栈上)。
+        //
+        // 为什么从栈改到堆 (用 make_unique_for_overwrite, 而不是 std::vector<std::byte>(2MB)):
+        //   - 把 2MB 放进次级线程栈会显著压缩栈余量, 大栈帧还可能触发额外页面触达/栈检查,
+        //     后续扩展也更容易栈溢出; 堆 arena 生命周期更明确。
+        //   - make_unique_for_overwrite 不主动清零整个 arena (区别于 std::vector(2MB) / 带括号
+        //     的 new[]() / calloc 那种值初始化), 可避免无意义地写满 2MB。注意: 实际页面提交、
+        //     物理驻留与 page fault 数取决于系统分配器、页面复用与运行时访问模式 —— 别写死成
+        //     "只有写入部分才落物理页"或"栈版一定被强制触达整块 2MB"。
+        //   - arena 移到堆上后不再需要给 worker 配 4MB 栈, pthread 用系统默认栈即可。
+        //   - (先前感到"堆版更卡"是因为当时用了会清零的写法; 本写法无清零, 不复现该开销。)
+        // 关于缓存: 别再写"L1/L2 热 / TLB 不 miss"。2MB = 512 页, 远超 L1 DTLB;
+        //   能保证的只是减少分配器调用 + 让 temps/bucket 集中在一段连续内存 (利于顺序访问的局部性)。
+        // 关于 fallback: pool 没显式指定 upstream, 默认 = get_default_resource() (= new/delete)。
+        //   故【不是】严格只用这 2MB: 超大导入耗尽后会 fallback 到堆而非崩溃 (有意为之, 比抛
+        //   bad_alloc 退出更实用)。另注 monotonic_buffer_resource 不回收 vector 扩容前的旧块,
+        //   直到整个 pool 析构 —— 一旦 reserve() 预估被大幅突破, arena 占用会比普通 allocator
+        //   涨得快。
+        // 生命周期: 声明顺序 arena → pool → alloc, 析构逆序 (alloc/pool 先, arena 后), 故 pool
+        //   引用的 arena 内存在 pool 存活期间始终有效; 各 pmr 容器声明在 alloc 之后, 会更早析构。
+        constexpr size_t kArenaSize = 2 * 1024 * 1024;
+        auto arena = std::make_unique_for_overwrite<std::byte[]>(kArenaSize);
+        std::pmr::monotonic_buffer_resource pool(arena.get(), kArenaSize);
         std::pmr::polymorphic_allocator<std::byte> alloc(&pool);
 
         InitCDFTables();
@@ -969,7 +1084,12 @@ void* analyze_worker(void* arg) {
         }
 
         // 按 |id| 升序、武器(id<0)放后面;数据已经有序则跳过排序(常见情形)
-        auto abs_ll = [](long long v){return v<0 ? -v : v;};
+        // 防御 LLONG_MIN: 对 v == LLONG_MIN 取 -v 是有符号溢出 (UB)。正常抽卡 id 不会是
+        // LLONG_MIN, 但 id 来自外部文件, 用无符号求绝对值规避 UB (升序排序语义不变)。
+        auto abs_ll = [](long long v) -> unsigned long long {
+            return v < 0 ? (0ULL - static_cast<unsigned long long>(v))
+                         : static_cast<unsigned long long>(v);
+        };
         auto less = [&](const Temp& a, const Temp& b){
             bool wa = a.id<0, wb = b.id<0;
             if(wa!=wb) return wa<wb;
@@ -1012,7 +1132,7 @@ void* analyze_worker(void* arg) {
 } // anonymous namespace
 
 // ============================================================
-// GachaAnalyzerWrapper 实现 (Pthread 调度,大栈 4MB)
+// GachaAnalyzerWrapper 实现 (直接调用; 调用方已在后台队列, arena 在堆上, 无需另起线程)
 // ============================================================
 @implementation GachaAnalyzerWrapper
 
@@ -1027,20 +1147,11 @@ void* analyze_worker(void* arg) {
 
     AnalyzeThreadContext ctx = { filePath, chars, poolMap, weapons, result };
 
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 4 * 1024 * 1024);
-
-    pthread_t thread;
-    int create_err = pthread_create(&thread, &attr, analyze_worker, &ctx);
-    pthread_attr_destroy(&attr);
-
-    if (create_err != 0) {
-        result.textOutput = @"底层大栈线程创建失败";
-        return result;
-    }
-
-    pthread_join(thread, NULL);
+    // 历史上这里 pthread_create + 立即 pthread_join, 但调用方 (Swift) 已在
+    // DispatchQueue.global(qos: .userInitiated) 后台执行, 且 arena 早已移到堆上 (不再需要大栈),
+    // 故再起一条线程并马上 join 不增加并行度, 只多一次线程创建/调度/栈预留。直接同步调用即可。
+    // (analyze_worker 内部自带 @autoreleasepool, 同步返回, 仍满足"读取全程在调用方协调块内"。)
+    analyze_worker(&ctx);
     return result;
 }
 @end
