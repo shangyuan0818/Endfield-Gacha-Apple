@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="512" height="512">
+<defs>
+<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
+  <feOffset dx="0" dy="3"/>
+  <feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>
+  <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+</defs>
+<g filter="url(#shadow)">
+<!-- 正面倒三角 — 最亮 -->
+<polygon points="58.8833905954,76.2613144921 100.0000000000,147.4773710158 141.1166094046,76.2613144921" fill="rgb(249,74,67)" stroke="white" stroke-width="0.85" stroke-opacity="0.70" stroke-linejoin="miter"/>
+<!-- 右下三角 -->
+<polygon points="141.1166094046,76.2613144921 100.0000000000,147.4773710158 166.5280715187,138.4100000000" fill="rgb(247,49,47)" stroke="white" stroke-width="0.85" stroke-opacity="0.65" stroke-linejoin="miter"/>
+<!-- 左下三角 -->
+<polygon points="58.8833905954,76.2613144921 33.4719284813,138.4100000000 100.0000000000,147.4773710158" fill="rgb(213,20,30)" stroke="white" stroke-width="0.75" stroke-opacity="0.45" stroke-linejoin="miter"/>
+<!-- 顶部条状三角 -->
+<polygon points="100.0000000000,23.1800000000 58.8833905954,76.2613144921 141.1166094046,76.2613144921" fill="rgb(170,12,22)" stroke="white" stroke-width="0.65" stroke-opacity="0.28" stroke-linejoin="miter"/>
+<!-- 右下底部三角 -->
+<polygon points="100.0000000000,176.8200000000 166.5280715187,138.4100000000 100.0000000000,147.4773710158" fill="rgb(238,40,42)" stroke="white" stroke-width="0.80" stroke-opacity="0.55" stroke-linejoin="miter"/>
+<!-- 左下底部三角 -->
+<polygon points="100.0000000000,176.8200000000 100.0000000000,147.4773710158 33.4719284813,138.4100000000" fill="rgb(218,21,31)" stroke="white" stroke-width="0.75" stroke-opacity="0.50" stroke-linejoin="miter"/>
+<!-- 右侧三角 -->
+<polygon points="141.1166094046,76.2613144921 166.5280715187,138.4100000000 166.5280715187,61.5900000000" fill="rgb(219,21,31)" stroke="white" stroke-width="0.80" stroke-opacity="0.50" stroke-linejoin="miter"/>
+<!-- 左侧三角 — 最暗 -->
+<polygon points="33.4719284813,61.5900000000 33.4719284813,138.4100000000 58.8833905954,76.2613144921" fill="rgb(132,8,17)" stroke="white" stroke-width="0.55" stroke-opacity="0.18" stroke-linejoin="miter"/>
+<!-- 右上顶部三角 -->
+<polygon points="100.0000000000,23.1800000000 141.1166094046,76.2613144921 166.5280715187,61.5900000000" fill="rgb(148,9,19)" stroke="white" stroke-width="0.60" stroke-opacity="0.22" stroke-linejoin="miter"/>
+<!-- 左上顶部三角 — 最暗 -->
+<polygon points="100.0000000000,23.1800000000 33.4719284813,61.5900000000 58.8833905954,76.2613144921" fill="rgb(132,8,17)" stroke="white" stroke-width="0.55" stroke-opacity="0.16" stroke-linejoin="miter"/>
+</g>
+</svg>
