@@ -297,9 +297,7 @@ struct FetcherView_iOS: View {
                         return try Data(contentsOf: workingURL, options: .uncached)
                     }.value
                     try Task.checkCancellation()   // 读取期间若已离开页面(本任务被取消)就别再弹导出器
-                    appendLogs(["",
-                                "====================",
-                                "完成! 本次新增 \(result.newCount) 条, 共计 \(result.totalCount) 条"])
+                    appendLogs(["", "===================="] + result.summaryLines)
                     pendingDocument = JSONFileDocument(data: data)
                     showExporter = true
                 } catch is CancellationError {

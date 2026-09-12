@@ -9,6 +9,9 @@
 //
 
 #import "AnalyzerWrapper.h"
+
+#include "JsonScan.h"   // 与 FetchSession.mm 共用的 JSON 扫描器 (v0.1.5.1 抽出)
+
 #include <pthread.h>
 
 #include <algorithm>
@@ -129,49 +132,50 @@ inline GachaType ParseGachaType(std::string_view sv) {
 }
 
 // ------ JSON 解析 ------
-inline size_t FindJsonKey(std::string_view src, std::string_view key, size_t pos=0) {
-    while (true) {
-        pos = src.find(key, pos);
-        if (pos==std::string_view::npos) return pos;
-        if (pos>0 && src[pos-1]=='"' && pos+key.size()<src.size() && src[pos+key.size()]=='"')
-            return pos-1;
-        pos += key.size();
-    }
+//
+// v0.1.5.1: 扫描器整段提到共享头 JsonScan.h, 与 FetchSession.mm 用同一份实现。
+//   此前两边各抄一份 (上游 gui.cpp / main.cpp 也是如此), 于是导出器改成按结构路径读存档之后,
+//   分析器还停在"全文找第一个 list"上 —— 同一份合法存档只要顶层成员顺序变成
+//   non_pull_events 在前, 分析器就会读到事件 raw 里那个空的 "list": [] 而报"无数据"。
+//   另外分析器那版 ForEachJsonObject 返回 void: 数组被截断或混进非对象元素时, 已经吃进的
+//   前半段照常参与统计, 用户看到的是一份"少了一截但看起来正常"的报表。
+using JsonValueKind = efjson::ValueKind;
+using JsonValueRef  = efjson::ValueRef;
+using JsonArrayScan = efjson::ArrayScan;
+
+inline size_t FindJsonKey(std::string_view src, std::string_view key, size_t pos = 0) {
+    return efjson::FindKeyToken(src, key, pos);
 }
 inline std::string_view ExtractJsonValue(std::string_view src, std::string_view key, bool isStr) {
-    size_t pos = FindJsonKey(src, key);
-    if (pos==std::string_view::npos) return {};
-    pos = src.find(':', pos+key.size()+2);
-    if (pos==std::string_view::npos) return {};
-    ++pos;
-    while (pos<src.size()&&(src[pos]==' '||src[pos]=='\t'||src[pos]=='\n'||src[pos]=='\r')) ++pos;
-    if (isStr) {
-        if (pos>=src.size()||src[pos]!='"') return {};
-        ++pos; size_t e=pos;
-        while (e<src.size()&&src[e]!='"') { if (src[e]=='\\'&&e+1<src.size()) e+=2; else ++e; }
-        return e<src.size() ? src.substr(pos,e-pos) : std::string_view{};
-    } else {
-        size_t e=pos;
-        while (e<src.size()&&src[e]!=','&&src[e]!='}'&&src[e]!=']'&&src[e]!=' '&&src[e]!='\n'&&src[e]!='\r') ++e;
-        return src.substr(pos,e-pos);
-    }
+    return efjson::ExtractValue(src, key, isStr);
 }
 template<typename Cb>
-void ForEachJsonObject(std::string_view src, std::string_view arrKey, Cb&& cb) {
-    size_t pos = FindJsonKey(src,arrKey);
-    if (pos==std::string_view::npos) return;
-    pos = src.find(':',pos+arrKey.size()+2);
-    if (pos==std::string_view::npos) return;
-    pos = src.find('[',pos);
-    if (pos==std::string_view::npos) return;
-    int depth=0; size_t objStart=0;
-    for (size_t i=pos; i<src.size(); ++i) {
-        char c=src[i];
-        if (c=='"') { for(++i;i<src.size();++i){if(src[i]=='\\'&&i+1<src.size()){++i;continue;}if(src[i]=='"')break;} continue; }
-        if (c=='{'){if(depth==0)objStart=i;++depth;}
-        else if(c=='}'){--depth;if(depth==0)cb(src.substr(objStart,i-objStart+1));}
-        else if(c==']'&&depth==0)break;
+[[nodiscard]] JsonArrayScan ForEachJsonObject(std::string_view src, std::string_view arrKey, Cb&& cb) {
+    return efjson::ForEachObjectByKey(src, arrKey, std::forward<Cb>(cb));
+}
+
+// 读 UIGF v4.2 存档里的抽卡记录数组: 结构路径 根.endfield[0].list 优先, 失败再回退全文找键。
+//
+// 为什么还要保留回退: 分析页接受【用户从任何工具导出的】UIGF 文件, 结构不一定是
+//   endfield[0].list (老版本 v3.0、别的游戏段、别人的扩展写法)。结构路径命中时按结构走,
+//   彻底消除"顶层成员顺序影响读取结果"这个问题; 没命中时退回原来的宽松路径, 保持兼容。
+// 返回值语义与 JsonArrayScan 一致: NotFound = 没有记录数组; Malformed = 找到了但结构坏了
+//   (截断 / 非对象元素 / 缺分隔逗号), 调用方必须据此报错而不是按残缺数据出统计。
+template<typename Cb>
+[[nodiscard]] JsonArrayScan ReadUigfPullList(std::string_view doc, bool& usedStructuredPath, Cb&& cb) {
+    usedStructuredPath = false;
+    const JsonValueRef game = efjson::FindMember(doc, "endfield");
+    if (game.kind == JsonValueKind::Array) {
+        const JsonValueRef entry0 = efjson::FirstElement(game.text);
+        if (entry0.kind == JsonValueKind::Object) {
+            const JsonValueRef listV = efjson::FindMember(entry0.text, "list");
+            if (listV.kind == JsonValueKind::Array) {
+                usedStructuredPath = true;
+                return efjson::ForEachObjectIn(listV.text, std::forward<Cb>(cb));
+            }
+        }
     }
+    return efjson::ForEachObjectByKey(doc, "list", std::forward<Cb>(cb));
 }
 
 // ------ 字符串工具 ------
@@ -264,6 +268,13 @@ struct StatsAccumulator {
     long long sum_all=0, sum_sq_all=0, sum_up=0, sum_sq_up=0, sum_win=0;
     int count_all=0, count_up=0, count_win=0, max_pity_all=0, max_pity_up=0;
     int win_5050=0, lose_5050=0, censored_pity_all=0, censored_pity_up=0;
+    // v0.1.5.1: UP 侧的右删失观测【可能不止一条】。重构寻访按系列独立计数, 每个还没出 UP
+    //   的系列都是一条"活到 x 抽仍未出 UP"的删失观测; 只取最后活动的那个会把其余系列整条
+    //   丢出 Kaplan-Meier 的风险集, 使 hazard 在大 x 处被高估、MRL 给出的"还要多少抽"偏乐观。
+    //   censored_pity_up 保留为【界面显示】用的那一个 (玩家正在抽的那期), 风险集用下面两项。
+    std::array<int,260> censored_up_marks{};   // 每个水位 x 上有几条 UP 删失观测
+    int censored_up_count = 0;                 // 删失观测总条数
+    int max_censored_up   = 0;                 // 其中最大的水位
 };
 
 // ------ CDF 表 ------
@@ -839,8 +850,7 @@ struct StatsResult {
 // v0.1.4.0 加 isRefactor 参数 (重构寻访 RE-Factor):
 //   - 池中六星 = 当期 UP + 5 名常驻 (无往期限定滞留), 所以 pool_map 与常驻排除法
 //     两条路径都能正确判 UP; 与 Special 一样走 pool_map 优先。
-//   - 80 抽小保底【所有重构寻访之间共享继承】→ cur_pity 全局共享, 不按期重置
-//     (track_banner = false)。
+//   - 80 抽小保底【所有重构寻访之间共享继承】→ cur_pity 全局共享, 不按期重置。
 //   - 120 抽 UP 保底 / 累计奖励 / 未使用的加急招募【只在同名系列内继承, 且兜底一生仅
 //     生效 1 次】→ 这三样按 pool_name 存进 series_states, 离开某系列再回来能接上进度。
 //     不能用"换池就清零"来近似: 那样 A→B→A 时 A 的进度会丢 (见 series_states 处说明)。
@@ -852,21 +862,22 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     bool isRefactor = false)
 {
     StatsAccumulator acc;
-    int cur_pity=0, pity_up=0;
-    // 卡池边界重置策略 (终末地三池各不同 —— 联网核实 + 数据验证):
+    int cur_pity=0, pity_up=0;            // 函数级单份状态 (特许 / 辉光用; 见下方 keyedUp/keyedAll)
+    // 保底作用域 (四池各不同 —— 联网核实 + 数据验证):
     //   - 特许池(Special): 仅 120 硬保底每期重置 (pity_up); 80 小保底【继承】(cur_pity 不重置)
-    //   - 武器池(Weapon):  40 小保底 + 80 硬保底【都】每期重置 (cur_pity 与 pity_up 都重置, 均不继承)
+    //   - 武器池(Weapon):  40 小保底 + 80 硬保底都【按期】独立 (v0.1.5.1 起改为按 pool_name 存,
+    //                      不再靠相邻探测 —— 1.5 起重构申领与武库申领的记录会交错)
     //   - 辉光庆典(Joint): 无硬保底, 连续累加, 不按期重置
-    //   got_up_banner: 本期是否已出过 UP/限定 (硬保底每期仅生效一次), 每期重置
+    //   - 重构寻访(Refactor): 80 小保底跨所有重构池共享继承 (全局), 120 UP 保底按【同名系列】
+    //                      一生一次 (按 pool_name 存)
+    //   got_up_banner: 本期/本系列是否已出过 UP (硬保底每期仅生效一次)
     //   hardpity_n:    硬保底强制阈值 —— 角色 120 抽; 武器 8 申领(= 第 71..80 抽强制出限定)
-    // 边界用 poolName 变化探测 (每期 pool_name 唯一; 武器记录 id 为负, 桶内按 |id| 升序 = 时间序).
     bool got_up_banner=false;
-    // 重构寻访: 80 小保底跨所有重构池共享继承, 120 UP 保底按【同名系列】一生一次,
-    //   两者都不按期重置 → 与 Joint 一样 track_banner = false;
-    //   但它【有】120 硬保底 (Joint 没有), 所以 forced_by_hardpity 要单独放行, 见下。
     const bool track_special = (!isWeapon && !isJoint && !isRefactor);
     const bool track_weapon  = isWeapon;
-    const bool track_banner   = (track_special || track_weapon);   // Joint / Refactor 不按期重置
+    // track_banner 现在只表示"这个池型【有】硬保底"(用于 forced_by_hardpity 的剔除),
+    // 不再承担边界重置的职责 —— 那已经由下面的按键存状态接管。
+    const bool track_banner  = (track_special || track_weapon);   // Joint 没有硬保底
     const int  hardpity_n    = isWeapon ? 71 : 120;
 
     // 赠送十连块计数 (v0.1.4.0): 重构寻访在累计 30/60/90 抽各送 1 次免费十连,
@@ -878,9 +889,11 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     //   (「未使用的加急招募, 将保留到后续同名重构寻访中」), 玩家完全可能攒够 90 抽后
     //   连着开三次十连, 记录里就是连续 30 条 is_free=true, 跳变法只会数出 1 块。
     //
-    //   已知局限: 抽卡记录只保留最近 90 天, 历史被截断时第一块可能只剩半截, 会让后续
-    //   块序号整体偏移。无法从记录本身分辨, 故不做补偿 —— 影响仅限赠送出货落在哪个
-    //   理论节点, 不影响出货计数与胜负统计。
+    //   已知局限: 抽卡记录只保留最近 90 天, 历史被截断时第一块可能只剩半截 (甚至整块被切掉),
+    //   会让后续块序号整体降一档。无法从记录本身分辨, 故不做补偿。
+    //   ★ v0.1.5.1 更正此前的注释: 影响【不】只是"落在哪个理论节点"。slot_up / slot_all 会
+    //   直接进 sum_up / sum_all, 所以 avg / 95% CI / CV / K-S D 也会跟着偏低 —— 节点值就是
+    //   被计入的抽数, 是同一个量。只有出货计数与胜负统计不受影响。
     int free_pull_count = 0;                       // 非重构池用 (恒为节点 30, 实际不参与计算)
 
     // 重构寻访的【按系列保存】状态 (v0.1.4.0)。
@@ -894,49 +907,67 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     //   也会把已经用掉的兜底额度错误地"还"给 A。而且这【不需要两个系列同时开放】,
     //   依次经历 A 第一期 → B 第一期 → A 第二期就会发生。
     //   系列标识用 pool_name: 同名系列的 #1/#2/#3 共用一个 pool_name, 不同系列名字不同。
-    struct SeriesState {
-        int  pity_up    = 0;      // 距该系列上一个 UP 的抽数 (即 120 兜底的计数)
+    // v0.1.5.1: 这套"按 pool_name 存状态"从重构寻访推广到武器池, 原因见下。
+    struct BannerState {
+        int  pity_all   = 0;      // 距该池上一个六星的抽数 (只有武器池用: 角色池的小保底是全局的)
+        int  pity_up    = 0;      // 距该池/该系列上一个 UP 的抽数 (硬保底的计数)
         int  free_count = 0;      // 该系列已用掉的赠送十连条数 (决定 30/60/90 节点)
-        bool got_up     = false;  // 该系列的 120 兜底额度是否已被本体抽消耗
+        bool got_up     = false;  // 该池/该系列的硬保底额度是否已被本体抽消耗
+        int  up_count   = 0;      // 该池/该系列内已出的 UP 个数 (判"样本是否混合", 见 ks_up_mixed)
     };
-    std::unordered_map<std::string_view, SeriesState> series_states;
-    SeriesState* last_series = nullptr;   // 收尾算右删失时用最后活动的那个系列
+    std::unordered_map<std::string_view, BannerState> series_states;
+    BannerState* last_series = nullptr;   // 收尾算右删失时用最后活动的那一份
+
+    // 状态的作用域 (四种池各不相同):
+    //   keyedUp  = UP 侧状态 (硬保底计数 / 额度 / 赠送十连块) 按 pool_name 各存一份
+    //   keyedAll = 连综合六星水位也按 pool_name 各存一份 (只有武器池需要)
+    //
+    // 武器池为什么必须按键存 (v0.1.5.1):
+    //   1.5 起「重构申领」(poolId rerun_wpn_*) 与常规「武库申领」【同时开放】, 而武器记录
+    //   接口没有 pool_type 参数 —— 所有武器池都在同一条 /api/record/weapon 时间线里返回,
+    //   桶内按 |id| 升序 = 真实时间序, 于是两池的记录是【交错】的。旧的"相邻记录 pool_name
+    //   变了就算新一期"探测会把玩家每一次来回切池都当成换期而清零水位: 真实垫到第 40 抽才
+    //   出的六星可能被记成 pity=10, freq_all / avg / CV / 95% CI / K-S 全部系统性偏低,
+    //   pity_up 同样被反复清零使 80 抽硬保底的剔除永不触发, UP 率被抬高。
+    //   按 pool_name 各存一份之后, 交错不再互相干扰。
+    //   对【顺序出现、不交错】的既有数据, 两种写法逐位等价 (换期时新键的初值就是 0)。
+    const bool keyedUp  = (isRefactor || track_weapon);
+    const bool keyedAll = track_weapon;
 
     const size_t total = bucket.size();
     for(size_t i=0; i<total; ++i){
         const bool isFree = bucket.is_free[i];
 
-        // 重构池: 按 pool_name 取出该系列自己的状态 (不存在则默认构造 = 全新系列)。
+        // 按 pool_name 取出这一期/这个系列自己的状态 (不存在则默认构造)。
         //   unordered_map 是节点式容器, 插入新键不会让已取得的引用失效。
-        //   非重构池仍用函数级的单份状态, 行为与既有版本完全一致。
-        SeriesState* ss = nullptr;
-        if (isRefactor) {
+        //   特许/辉光池仍用函数级的单份状态, 行为与既有版本完全一致。
+        BannerState* ss = nullptr;
+        if (keyedUp) {
             ss = &series_states[bucket.poolNames[i]];
             last_series = ss;
         }
-        int&  up_pity   = isRefactor ? ss->pity_up    : pity_up;
-        bool& up_gotten = isRefactor ? ss->got_up     : got_up_banner;
-        int&  free_cnt  = isRefactor ? ss->free_count : free_pull_count;
+        int&  pity_all  = keyedAll ? ss->pity_all   : cur_pity;
+        int&  up_pity   = keyedUp  ? ss->pity_up    : pity_up;
+        bool& up_gotten = keyedUp  ? ss->got_up     : got_up_banner;
+        int&  free_cnt  = keyedUp  ? ss->free_count : free_pull_count;
 
         // 本条若是赠送十连, 先算出它属于第几块 (1-based), 再累加计数
         int free_block_idx = 0;
         if (isFree) free_block_idx = (free_cnt++ / 10) + 1;
 
-        // 卡池边界探测: poolName 变化 = 进入新一期卡池.
-        //   特许池: 120 硬保底不继承 → pity_up + got_up_banner 清零; 80 小保底继承 (cur_pity 不动)
-        //   武器池: 40 + 80 都不继承 → cur_pity + pity_up + got_up_banner 全清零
-        // 重构池【不】走这里: 它的 UP 侧状态按系列存在 series_states 里, 换池只是换一份
-        //   状态, 不需要清零; cur_pity 则跨所有重构池共享, 更不能清。
-        //   这样两个系列即使记录交错 (将来两个重构系列同时开放), 各自的计数也互不干扰。
-        if (track_banner && i > 0 && bucket.poolNames[i] != bucket.poolNames[i - 1]) {
+        // 卡池边界探测: 只剩【特许寻访】还用"相邻记录 pool_name 变了 = 进入新一期"。
+        //   特许池: 120 硬保底不继承 → pity_up + got_up_banner 清零; 80 小保底继承 (cur_pity 不动)。
+        //   同一时间只开一期特许寻访, 记录不会交错, 所以相邻探测在这里是安全的。
+        //   武器池 / 重构池的状态已经按 pool_name 各存一份 (见上), 换池只是换一份状态,
+        //   不需要也不能在这里清零。
+        if (track_special && i > 0 && bucket.poolNames[i] != bucket.poolNames[i - 1]) {
             pity_up       = 0;
             got_up_banner = false;
-            if (track_weapon) cur_pity = 0;   // 武器 40 小保底也每期重算 (角色 80 小保底继承, 不清)
         }
 
         // 赠送十连: 不推进保底通道
         if (!isFree) {
-            ++cur_pity; ++up_pity;
+            ++pity_all; ++up_pity;
         }
 
         if(bucket.rank_types[i]!=RankType::Rank6) [[likely]] continue;
@@ -957,7 +988,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             free_node_all = 60;
             free_node_up  = (free_block_idx == 2) ? 60 : 90;
         }
-        const int slot_all = isFree ? free_node_all : cur_pity;
+        const int slot_all = isFree ? free_node_all : pity_all;
         if(slot_all<260) acc.freq_all[slot_all]++;
         if(slot_all>acc.max_pity_all) acc.max_pity_all=slot_all;
         acc.count_all++;
@@ -983,6 +1014,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             acc.count_up++;
             acc.sum_up    += slot_up;
             acc.sum_sq_up += (long long)slot_up*slot_up;
+            if (ss) ss->up_count++;   // 重构池: 记在【所属系列】名下, 而不是整桶
 
             // 胜负统计 (修正: 终末地无“歪→下次必中”, 每个六星/六星武器都是独立判定):
             //   - 角色池 50/50, 武器池 25% 条件率 —— 每个 UP/限定都计入“胜”, 唯一例外:
@@ -992,9 +1024,9 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             //   - 辉光庆典: 无硬保底, 每个限定直接计入。
             //   - avg_win (count_win/sum_win) 对特许/重构池有物理含义 (两者都有"歪/不歪");
             //     武器池与辉光庆典不累计, avg_win 保持 -1。
-            // 重构寻访虽然 track_banner=false (不按期重置), 但它【有】120 抽硬保底,
-            // 只是作用域是"同名系列一生一次" —— up_gotten 对重构池取的是【该系列】的
-            // 状态且永不清零, 恰好等价于该语义, 故这里把 isRefactor 一并放行。
+            // 重构寻访也【有】120 抽硬保底, 只是作用域是"同名系列一生一次" —— up_gotten
+            // 对重构池取的是【该系列】的状态且永不清零, 恰好等价于该语义, 故一并放行。
+            // (track_banner 只涵盖特许与武器, 见上方定义。)
             const bool forced_by_hardpity =
                 (track_banner || isRefactor) && !up_gotten && !isFree && up_pity >= hardpity_n;
             if(isJoint){
@@ -1019,13 +1051,38 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             // 非 UP/非限定六星 = 一次独立判定的“负”。终末地可连续歪多次, 全部如实计入。
             acc.lose_5050++;
         }
-        // 赠送十连出货不重置 cur_pity (独立通道); 正常出货重置
-        if (!isFree) cur_pity=0;
+        // 赠送十连出货不重置综合水位 (独立通道); 正常出货重置
+        if (!isFree) pity_all=0;
     }
-    acc.censored_pity_all = cur_pity;
-    // 右删失的 UP 水位: 重构池取【最后活动的那个系列】的进度 (界面"当前垫刀"关心的是
-    //   玩家正在抽的那期), 其余池型仍用函数级的单份状态。
-    acc.censored_pity_up  = (isRefactor && last_series) ? last_series->pity_up : pity_up;
+    // 综合六星的右删失: 武器池的水位按期各存一份, 取【最后活动的那一期】—— 与旧写法
+    //   (相邻探测每期清零, 收尾时 cur_pity 恰好就是最后一期的残值) 在顺序数据上逐位等价。
+    acc.censored_pity_all = (keyedAll && last_series) ? last_series->pity_all : cur_pity;
+    // 右删失的 UP 水位: 按键存状态的池型 (武器 / 重构) 取【最后活动的那一份】的进度 ——
+    //   界面上的"当前垫刀"关心的是玩家正在抽的那期; 特许/辉光仍用函数级的单份状态。
+    //   ★ 这里必须用 keyedUp 而不是 isRefactor: 武器池的 up_pity 现在也绑在按键状态上,
+    //     漏掉它会让武器池的"距上次 UP N 抽"恒显示 0。
+    acc.censored_pity_up  = (keyedUp && last_series) ? last_series->pity_up : pity_up;
+    // Kaplan-Meier 的风险集要把【每一个】还没出 UP 的系列都算上, 见 StatsAccumulator 的说明。
+    {
+        auto markCensored = [&](int x){
+            if (x <= 0) return;
+            if (x > 259) x = 259;
+            acc.censored_up_marks[x]++;
+            acc.censored_up_count++;
+            if (x > acc.max_censored_up) acc.max_censored_up = x;
+        };
+        if (isRefactor) {
+            // 重构寻访的 120 兜底计数【跨期继承】(官方: "计数将继承到后续的同名重构寻访中"),
+            // 所以每个还没出 UP 的系列都是一条真正还在走的删失观测, 都要进风险集。
+            for (const auto& kv : series_states) markCensored(kv.second.pity_up);
+        } else if (keyedUp) {
+            // 武器池: 每期的 80 抽硬保底【不】继承, 已经结束的那几期不是"还在等", 只有最后
+            // 活动的那一期才是删失观测 —— 与旧写法保持一致, 不改动既有用户的武器统计。
+            markCensored(last_series ? last_series->pity_up : 0);
+        } else {
+            markCensored(pity_up);
+        }
+    }
 
     // 防御性 clamp:即使数据异常导致 max_pity > 259,后续读取也必须安全
     if (acc.max_pity_all > 259) acc.max_pity_all = 259;
@@ -1091,12 +1148,20 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
 
         // g_cdf_refactor_up 描述的是【系列内第一个 UP】的分布 —— 它在 n=120 强制收敛到 1,
         // 依据是「前120次寻访必定获取 UP, 该规则在同名重构寻访中仅生效 1 次」。
-        // 而 freq_up 记的是每两个 UP 之间的间隔: 第 2 个及以后的 UP 已经没有这个兜底,
-        // 分布是无截断的长尾。两者不是同一个统计对象, 一旦样本里出现第 2 个 UP,
-        // 整体就成了混合分布, 再拿这条曲线判"符合/偏离"就没有依据了。
-        // 这不需要等到复刻才会发生 —— 首期追潜多抽一个 UP 就会遇到。
-        // 故这里只标记, 由输出层把判定改成"样本混合"; D 值仍照常算出供参考。
-        s.ks_up_mixed = (isRefactor && acc.count_up > 1);
+        // 而 freq_up 记的是每两个 UP 之间的间隔: 同一系列里第 2 个及以后的 UP 已经没有这个
+        // 兜底, 分布是无截断的长尾。两者不是同一个统计对象, 混在一起就没法判"符合/偏离"。
+        //
+        // v0.1.5.1: 判据从"整桶 count_up > 1"改成"【某个系列内】出现了第 2 个 UP"。
+        //   旧写法把"两个不同系列各出 1 个首 UP"也误标成混合 —— 那恰恰是同分布的合法样本,
+        //   本可以判定却被吞掉了结论。
+        //   已知仍未覆盖的一种真混合: 某系列的 120 兜底在更早的、已被 90 天窗口截掉的记录里
+        //   就用掉了, 从记录本身无法分辨; 这种情况会被当成"未混合"而给出判定。
+        s.ks_up_mixed = false;
+        if (isRefactor) {
+            for (const auto& kv : series_states) {
+                if (kv.second.up_count > 1) { s.ks_up_mixed = true; break; }
+            }
+        }
         if (isWeapon) {
             // v0.1.3.3 武器 UP K-S: 先把经验 freq_up 按申领 (10 抽) 粒度向上聚合再比较。
             // 原因: g_cdf_wep_up 的质量只在 10 倍数边界记账 (申领内平坦, 机制如此),
@@ -1121,16 +1186,16 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
         }
         s.ks_is_normal_up = (s.ks_d_up <= 1.36/std::sqrt((double)acc.count_up));
     }
-    // UP hazard 同理
-    if(acc.count_up>0 || acc.censored_pity_up>0){
-        int surv = acc.count_up + (acc.censored_pity_up>0 ? 1 : 0);
-        int maxR = std::max(acc.max_pity_up, acc.censored_pity_up);
+    // UP hazard 同理。风险集含【全部】删失观测 (非重构池恒为 0 或 1 条, 与旧行为逐位一致)。
+    if(acc.count_up>0 || acc.censored_up_count>0){
+        int surv = acc.count_up + acc.censored_up_count;
+        int maxR = std::max(acc.max_pity_up, acc.max_censored_up);
         if (maxR > 259) maxR = 259;
         for(int x=1; x<=maxR; ++x){
             if(surv>0){
                 s.hazard_up[x] = (double)acc.freq_up[x]/surv;
                 surv -= acc.freq_up[x];
-                if(x==acc.censored_pity_up) surv--;
+                surv -= acc.censored_up_marks[x];
             }
         }
     }
@@ -1191,6 +1256,11 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj,
     };
     NSString* winC = sc.avg_win>=0 ? [NSString stringWithFormat:@"%.2f 抽", sc.avg_win] : @"[无数据]";
     NSString* winR = sr.avg_win>=0 ? [NSString stringWithFormat:@"%.2f 抽", sr.avg_win] : @"[无数据]";
+    // v0.1.5.1: 重构池的"理论 ≈ 77.83"是 E[系列内第一个 UP] (前提: 120 兜底未用掉)。
+    //   样本一旦混进同系列的第 2 个 UP, 这个基准就不适用了 —— 下面的 K-S 判定已经降级成
+    //   "样本混合, 不判定", 均值行的理论值也必须跟着说清楚, 否则同一段输出自相矛盾。
+    NSString* refTheoryUp = sr.ks_up_mixed ? @"(理论 ≈ 77.83, 仅适用于系列内首个 UP; 本样本混合)"
+                                           : @"(理论 ≈ 77.83)                    ";
     return [NSString stringWithFormat:
         @"【角色卡池 (特许寻访)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星 (含歪) 出货平均期望:     %.2f 抽 (理论 ≈ 51.81)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
@@ -1204,7 +1274,7 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj,
         // 赠送十连 (累计 60 / 90 抽)。UP 占比官方未公布, 暂沿用特许寻访的 50%。
         @"【角色卡池 (重构寻访)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星 (含歪) 出货平均期望:     %.2f 抽 (理论 ≈ 51.37)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
-        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 (理论 ≈ 77.83)   [95%% CI: %.1f ~ %.1f]    |   真实不歪率: %.1f%% (理论 50%%*) (%ld胜%ld负)\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
+        @" ▶ 抽到当期限定 UP 的综合平均期望:   %.2f 抽 %@ [95%% CI: %.1f ~ %.1f]    |   真实不歪率: %.1f%% (理论 50%%*) (%ld胜%ld负)\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
         @" ▶ 赢下小保底 (不歪) 的出货期望:     %@\t\t(* UP 占比官方未公布, 暂沿用特许寻访的 50%%, 待开池后核实)\n\n"
         @"【武器卡池 (武库申领)】 总计六星: %d | 出当期 UP: %d%@\n"
         @" ▶ 综合六星出货平均期望:             %.2f 抽 (理论 ≈ 19.17)   [95%% CI: %.1f ~ %.1f]    |   波动率 (CV): %.1f%%\t[K-S 检验偏离度 D值: %.3f (%@)]\n"
@@ -1231,7 +1301,7 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj,
         sr.count_all, sr.count_up, pendStr(sr.censored_pity_all,sr.censored_pity_up),
         sr.avg_all, std::max(1.0, sr.avg_all-sr.ci_all_err), sr.avg_all+sr.ci_all_err,
             sr.cv_all*100, sr.ks_d_all, ksLabel(sr.count_all, sr.ks_is_normal),
-        sr.avg_up, std::max(1.0, sr.avg_up-sr.ci_up_err), sr.avg_up+sr.ci_up_err,
+        sr.avg_up, refTheoryUp, std::max(1.0, sr.avg_up-sr.ci_up_err), sr.avg_up+sr.ci_up_err,
             (sr.win_rate_5050>=0?sr.win_rate_5050:0.0)*100,
             (long)sr.win_5050, (long)sr.lose_5050,
             sr.ks_d_up, ksUpLabel(sr.count_up, sr.ks_is_normal_up, sr.ks_up_mixed),
@@ -1335,18 +1405,21 @@ void* analyze_worker(void* arg) {
         std::pmr::vector<Temp> temps(alloc);
         temps.reserve(6000);
 
-        ForEachJsonObject(bufView, "list", [&](std::string_view item) {
+        bool usedStructuredPath = false;
+        const JsonArrayScan listScan = ReadUigfPullList(bufView, usedStructuredPath,
+                                                        [&](std::string_view item) {
             // UIGF v4.2 字段读取:
             //   - gacha_type   (替代 v3.0 的 uigf_gacha_type)
             //   - item_name    (替代 v3.0 的 name)
             //   - pool_name    (自定义,snake_case;原 poolName)
             //   - is_free      (自定义,snake_case;原 isFree)
-            //
-            // ForEachJsonObject 找的是 "list" 这个 key。v4.2 文件里 "list" 只
-            // 在 endfield[0] 内层出现一次(顶层 info 块没有 list),所以不需要
-            // 先穿透 endfield 数组,直接找到的就是正确的记录数组。
             ItemType  it = ParseItemType (ExtractJsonValue(item, "item_type",  true));
-            RankType  rt = ParseRankType (ExtractJsonValue(item, "rank_type",  true));
+            // rank_type: 字符串与数字两种形态都读。UIGF 的 endfield 段没有官方 schema,
+            //   第三方转换器把稀有度写成 JSON 数字 ("rank_type": 6) 很常见, 而 isStr=true
+            //   在"值不是以 \" 开头"时返回空视图 —— 旧写法会把这些真实记录整条丢掉。
+            std::string_view rankSv = ExtractJsonValue(item, "rank_type", true);
+            if (rankSv.empty()) rankSv = ExtractJsonValue(item, "rank_type", false);
+            RankType  rt = ParseRankType(rankSv);
             GachaType gt = ParseGachaType(ExtractJsonValue(item, "gacha_type", true));
             // v0.1.2.0 / v0.1.4.0: 接受四类记录
             //   cp = 角色 Special  (特许寻访)
@@ -1373,12 +1446,20 @@ void* analyze_worker(void* arg) {
             //   但【旧版导出的 uigf_endfield.json 里可能已经存了这类条目】, 那些记录的
             //   rank_type 是空串 → RankType::Unknown。若照单全收, 它们会被当成"一次没出
             //   六星的抽卡"而把保底水位多推 1 抽 (每 60 抽一本, 特许池尤其明显)。
-            //   稀有度是每条真实抽卡记录必有的字段, 所以这里用 rank_type 解析失败作为
-            //   判据, 安全且不会误删真实记录。
-            if(rt==RankType::Unknown) return;
+            //   v0.1.5.1 收紧判据: 旧写法只看 rank_type 解析失败, 比"幽灵记录"的本意宽得多 ——
+            //   稀有度写成数字、稀有度不在 3..6、或仅仅缺 rank_type 的【真实记录】都会被静默
+            //   丢掉, 而每丢一条, 其后所有六星的保底水位都少算 1 抽, 方向与想修的问题正好相反。
+            //   现在与导出器的迁移判据同源: 【没有物品 id 且没有稀有度】才算非抽卡事件。
+            //   (数字形态的稀有度已在上面被 rankSv 的双读兜住, 不会再走到这里。)
+            if(rt==RankType::Unknown && ExtractJsonValue(item, "item_id", true).empty()) return;
 
             auto name = ExtractJsonValue(item, "item_name", true);
+            // pool_name 是本工具的自定义扩展键, 不属于 UIGF 标准, 而且导出器在它为空时
+            // 【根本不写这个字段】。缺了它: 重构池的 series_states 会把所有系列塌缩成同一份
+            // 状态 (120 兜底与赠送十连计数全串在一起), 特许/武器池的"换期清零"也因为前后都是
+            // 空串而永不触发。回退到 gacha_type (poolId): 它是 UIGF 必填字段且每期唯一。
             auto pn   = ExtractJsonValue(item, "pool_name", true);
+            if (pn.empty()) pn = ExtractJsonValue(item, "gacha_type", true);
             auto idStr = ExtractJsonValue(item, "id", true);
             if(idStr.empty()) idStr = ExtractJsonValue(item, "id", false);
             long long pid=0;
@@ -1392,9 +1473,23 @@ void* analyze_worker(void* arg) {
             temps.push_back({pid, it, gt, rt, name, pn, isFree});
         });
 
+        // v0.1.5.1: 扫描状态必须检查。数组被截断 / 混进非对象元素 / 元素间缺分隔逗号时,
+        //   已经吃进的前半段照常在 temps 里, 旧写法只判 temps.empty(), 于是"半截历史"会被
+        //   当成全部历史出统计 —— 六星计数、均值、K-S、当前垫刀全部基于残缺样本, 而界面上
+        //   与"本来就抽得少"完全无法区分。同一个项目的拉取侧已经为读存档加了这道闸门。
+        if (listScan == JsonArrayScan::Malformed) {
+            munmap((void*)mapData, fileSize);
+            ctx->result.textOutput =
+                @"存档文件结构损坏或不完整: 抽卡记录数组没有正常闭合, 或含有非对象元素 / 缺少分隔逗号。\n"
+                @"为避免基于残缺数据给出错误统计, 已停止分析。请检查该文件 (例如是否仍在 iCloud 下载中, 或被其它工具写坏)。";
+            return nullptr;
+        }
+
         if (temps.empty()) {
             munmap((void*)mapData, fileSize);
-            ctx->result.textOutput = @"JSON 解析失败或无数据";
+            ctx->result.textOutput = (listScan == JsonArrayScan::NotFound)
+                ? @"没有在文件里找到抽卡记录数组 (UIGF v4.2 的 endfield[0].list)"
+                : @"文件里没有可分析的抽卡记录";
             return nullptr;
         }
 

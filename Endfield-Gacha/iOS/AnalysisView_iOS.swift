@@ -492,17 +492,23 @@ private struct PoolDetailCard: View {
             // 抽到 UP / 限定 平均: 同上, count_up=0 时 avg_up 未定义.
             // 辉光池没有"当期 UP"概念 (4 个 6 星里 2 限定 2 常驻),
             // 文案改成"抽到限定(非常驻)均值"语义更准确.
+            // v0.1.5.1: ks_up_mixed 时连这一行的对照基准也不成立 —— 理论 77.83 是
+            //   refactorPoolUP 算出的 E[系列内第一个 UP], 前提正是"120 兜底未用掉";
+            //   样本一旦混进第 2 个 UP, 拿它当基准就是在跟一个刚被判定为不适用的模型比。
+            //   旧写法只降级了下面的 K-S 行, 这一行照旧打印理论值, 同一张卡片自相矛盾。
             DetailRow(
                 label: kind == .joint ? "抽到限定(非常驻)均值" : "抽到 UP 综合均值",
                 value: stats.count_up > 0
                     ? String(format: "%.2f 抽", stats.avg_up)
                     : "—",
-                hint: stats.count_up > 0
-                    ? String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
-                             theoryAvgUp,
-                             max(0, stats.avg_up - stats.ci_up_err),
-                             stats.avg_up + stats.ci_up_err)
-                    : String(format: "理论 %.2f", theoryAvgUp)
+                hint: stats.ks_up_mixed
+                    ? String(format: "理论 %.2f 仅适用于系列内首个 UP · 本样本混合, 不作对照", theoryAvgUp)
+                    : (stats.count_up > 0
+                        ? String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
+                                 theoryAvgUp,
+                                 max(0, stats.avg_up - stats.ci_up_err),
+                                 stats.avg_up + stats.ci_up_err)
+                        : String(format: "理论 %.2f", theoryAvgUp))
             )
 
             // K-S 检验 (UP / 限定 六星): 与综合六星 KS 行紧邻,

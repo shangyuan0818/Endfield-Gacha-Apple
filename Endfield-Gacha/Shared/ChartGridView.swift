@@ -1115,6 +1115,13 @@ struct MRLCanvas: View {
         for i in 1..<260 {
             if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
         }
+        // v0.1.5.1: 删失观测 (当前垫刀) 也要计入量程, 否则它一旦超出 maxX, 下面画竖线的
+        //   resolveAndDrawLine 会直接放弃 —— 红色虚线与"已垫 N 抽 · 预期还需 X"标注整块消失,
+        //   而同一屏的文字统计 / iOS 详情卡仍在显示这个 N, 两处自相矛盾。
+        //   重构寻访把触发门槛从 251 降到 131: 该系列的 120 抽 UP 兜底一旦用掉, up_pity 就
+        //   再无上限, 长干时越过 130 很常见。
+        if censored_all > maxX { maxX = censored_all }
+        if censored_up  > maxX { maxX = censored_up }
         maxX = ((maxX / 10) + 1) * 10
         if maxX > 259 { maxX = 259 }
 

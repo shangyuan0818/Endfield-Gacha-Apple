@@ -22,14 +22,59 @@ import Foundation
 // MARK: - 值类型 / 错误
 
 struct PrepareOutcome: Sendable { let ok: Bool; let baseRecordCount: Int; let logs: [String]; let errorMessage: String? }
-struct ExportOutcome:  Sendable { let ok: Bool; let newCount: Int; let totalCount: Int; let tempFilePath: String?; let errorMessage: String? }
+struct ExportOutcome:  Sendable {
+    let ok: Bool
+    let newCount: Int            // 本次新增的抽卡记录数
+    let totalCount: Int          // 文件内抽卡记录总数
+    let newEventCount: Int       // 本次新增的非抽卡事件数
+    let totalEventCount: Int     // 文件内非抽卡事件总数
+    let migratedLegacyCount: Int // 从旧版 list 迁出的非抽卡事件条数
+    let skippedPoolNames: [String]
+    let tempFilePath: String?
+    let errorMessage: String?
+}
 enum   NextRequest:    Sendable { case ready(urlString: String, logs: [String]); case done(logs: [String]); case fatal(String) }
-enum   PageStatus:     Sendable { case continueFetching; case poolError(String?); case fatal(String) }
+// v0.1.5.1: 新增 .poolSkipped —— optional 池型 (目前是重构寻访) 在第一页失败且本池尚无
+//   任何记录时, 只跳过该池、继续其余池。没有这一档的话, 服务端一旦不认识新池型的
+//   pool_type 枚举, 整个拉取功能对该区服就是确定性不可用的 (重试多少次都一样)。
+enum   PageStatus:     Sendable { case continueFetching; case poolSkipped; case poolError(String?); case fatal(String) }
 struct PageOutcome:    Sendable { let status: PageStatus; let totalNewSoFar: Int; let delayMs: Int; let logs: [String] }
 
 /// run 的返回值。设计 E 原型只返回 URL; 这里附带 newCount/totalCount,
 /// 以便 View 维持"本次新增 X / 文件内共计 Y"的提示 (小幅扩展, 不改架构)。
-struct FetchResult: Sendable { let url: URL; let newCount: Int; let totalCount: Int }
+struct FetchResult: Sendable {
+    let url: URL
+    let newCount: Int
+    let totalCount: Int
+    let newEventCount: Int
+    let totalEventCount: Int
+    let migratedLegacyCount: Int
+    let skippedPoolNames: [String]
+}
+
+extension FetchResult {
+    /// 拉取结束时给用户看的摘要 (两个 View 共用同一套文案, 避免口径分叉)。
+    ///
+    /// v0.1.5.1: 抽卡与非抽卡事件分开报 —— 此前 newCount 含事件而 totalCount 只数抽卡,
+    /// 于是"本次新增 3 条, 共计 101 条"里两个数字不是一回事, 用户会以为丢了记录。
+    /// 旧版记录迁移与被跳过的卡池也必须在这里点名: 这两件事都会让"共计"与上一次对不上,
+    /// 不解释的话同样像是数据丢了。
+    var summaryLines: [String] {
+        var lines = ["完成! 本次新增 \(newCount) 条抽卡记录, 文件内共计 \(totalCount) 条"]
+        if newEventCount > 0 || totalEventCount > 0 {
+            lines.append("另有非抽卡事件 (如「寻访情报书」): 本次新增 \(newEventCount) 条, 共计 \(totalEventCount) 条")
+            lines.append("  (存放在 non_pull_events 键里, 不计入抽卡统计, 也不会被第三方 UIGF 工具当成抽卡)")
+        }
+        if migratedLegacyCount > 0 {
+            lines.append("其中 \(migratedLegacyCount) 条旧版误存在抽卡数组里的非抽卡事件已移出, 因此\"共计\"会比上次少 \(migratedLegacyCount) 条")
+        }
+        if !skippedPoolNames.isEmpty {
+            lines.append("已跳过的卡池: \(skippedPoolNames.joined(separator: "、"))")
+            lines.append("  (该池型在本区服/当前服务端版本上暂不可用, 其余卡池的数据不受影响)")
+        }
+        return lines
+    }
+}
 
 enum FetchError: Error {
     case prepareFailed(String)
@@ -192,10 +237,11 @@ extension GachaFetchCoordinator {
                 let o = box.session!.ingestResponseData(data)
                 let st: PageStatus
                 switch o.status {
-                case .continue:   st = .continueFetching
-                case .poolError:  st = .poolError(o.poolErrorMessage)
-                case .fatalError: st = .fatal(o.fatalErrorMessage ?? "未知 ingest 错误")
-                @unknown default: st = .fatal("未知 ingest 状态")
+                case .continue:    st = .continueFetching
+                case .poolSkipped: st = .poolSkipped
+                case .poolError:   st = .poolError(o.poolErrorMessage)
+                case .fatalError:  st = .fatal(o.fatalErrorMessage ?? "未知 ingest 错误")
+                @unknown default:  st = .fatal("未知 ingest 状态")
                 }
                 return PageOutcome(status: st, totalNewSoFar: o.totalNewSoFar, delayMs: o.delayMsBeforeNext, logs: o.logs)
             }
@@ -204,6 +250,10 @@ extension GachaFetchCoordinator {
             await MainActor.run { onLogBatch(outcome.logs); onProgress(outcome.totalNewSoFar) }
             switch outcome.status {
             case .continueFetching: break
+            case .poolSkipped:
+                // 可选池型不可用 (例如服务端还不认识重构寻访的 pool_type)。状态机已经推到
+                // 下一个池, 这里只需继续循环; 被跳过的池名由 writeExport 的摘要点名, 不静默。
+                break
             case .poolError(let m):
                 // 任一卡池失败 → 放弃整次拉取 (不写盘), 保护已有数据。
                 // 本轮已抓到的其它卡池新数据一并丢弃; 若是覆盖更新, 原文件保持不变。
@@ -220,7 +270,11 @@ extension GachaFetchCoordinator {
         try Task.checkCancellation()
         let summary: ExportOutcome = try await onWork {
             let s = box.session!.writeExport()
-            return ExportOutcome(ok: s.ok, newCount: s.newCount, totalCount: s.totalCount,
+            return ExportOutcome(ok: s.ok,
+                                 newCount: s.newCount, totalCount: s.totalCount,
+                                 newEventCount: s.newEventCount, totalEventCount: s.totalEventCount,
+                                 migratedLegacyCount: s.migratedLegacyCount,
+                                 skippedPoolNames: s.skippedPoolNames,
                                  tempFilePath: s.tempFilePath, errorMessage: s.errorMessage)
         }
         guard summary.ok, let tmp = summary.tempFilePath else { throw FetchError.write(summary.errorMessage ?? "写盘失败") }
@@ -228,7 +282,12 @@ extension GachaFetchCoordinator {
         do {
             try Task.checkCancellation()                 // 临时文件写完后、覆盖前 再查一次
             let saved = try await onWork { try Self.finalizeExport(tempPath: tmp, destination: destination, kind: destinationKind) }
-            return FetchResult(url: saved, newCount: summary.newCount, totalCount: summary.totalCount)
+            return FetchResult(url: saved,
+                               newCount: summary.newCount, totalCount: summary.totalCount,
+                               newEventCount: summary.newEventCount,
+                               totalEventCount: summary.totalEventCount,
+                               migratedLegacyCount: summary.migratedLegacyCount,
+                               skippedPoolNames: summary.skippedPoolNames)
         } catch {
             try? await onWork { try FileManager.default.removeItem(at: URL(fileURLWithPath: tmp)) }
             throw error
