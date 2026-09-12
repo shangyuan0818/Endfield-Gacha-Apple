@@ -103,6 +103,20 @@ inline bool ReadIntegerField(std::string_view obj, std::string_view key, long lo
     return efjson::ParseFullInt64(v.text, out);
 }
 
+// 读一个文本字段: 字符串取引号之间的原文 (转义不还原), 数字/布尔取字面量, 缺失/null 取空。
+//
+// v0.1.5.1: 存档字段此前一律用 ExtractJsonValue2(..., isStr=true) 读, 而它在"值不是以 \" 开头"
+// 时返回空视图。UIGF 的 endfield 段没有官方 schema, 第三方转换器把 rank_type 写成 JSON 数字
+// ("rank_type": 6) 很常见 —— 旧写法把它读成空, 再以 "rank_type": "" 原样回写, 覆盖用户唯一的
+// 长期存档, 稀有度就此永久消失; 分析端随后把这条当成"没出六星的一抽", 其后每个六星的保底
+// 水位都少算 1 抽。这里按 kind 取原文, 两种形态都读得进来 (写盘时统一成 UIGF 的字符串形态)。
+inline std::string_view ReadTextField(std::string_view obj, std::string_view key) {
+    const JsonValueRef v = efjson::FindMember(obj, key);
+    if (v.kind == JsonValueKind::String || v.kind == JsonValueKind::Number ||
+        v.kind == JsonValueKind::Bool) return v.text;
+    return {};
+}
+
 inline std::string_view ExtractUrlParam(std::string_view url, std::string_view key){
     size_t pos = url.find(key);
     if(pos==std::string_view::npos) return {};
@@ -540,7 +554,8 @@ inline NSString* NSStr(std::string_view sv){
             // v0.1.5.1: 抽卡记录区的 id 解析失败同样是"读不出来", 必须与事件区一个口径 ——
             //   id 是去重键, 静默塌成 0 会让"触达本地老记录"永不触发 (整段历史被重复追加),
             //   还会把原 id 以 "0" 回写覆盖。
-            size_t recordsMalformed = 0;
+            size_t recordsMalformed = 0;    // id / gacha_ts 读不出来的条数
+            size_t recordsBadSyntax  = 0;    // 整条记录本身就不是合法 JSON 对象的条数
             size_t endfieldEntries  = 0;     // endfield 数组的元素个数 (多账号存档要拒绝)
             ScopedFd in(::open(m.existFile.c_str(), O_RDONLY));   // RAII: 任何分支/异常都会关闭 fd
             if(in){
@@ -583,6 +598,16 @@ inline NSString* NSStr(std::string_view sv){
                                                  ? FindTopLevelValue2(entry0.text, "list") : JsonValueRef{};
                         if(listV.kind == JsonValueKind::Array){
                         pullScan = ForEachObjectInArray2(listV.text, [&](std::string_view item){
+                            // v0.1.5.1: 每条记录先过一次【完整语法校验】。ForEachObjectInArray2
+                            //   只保证元素的括号配对, 元素内部的成员层没有校验; 而下面所有字段
+                            //   读取都假设这条记录是完整可读的。一条 {"id":"1","item_id":} 这样
+                            //   括号配对正确、成员层却断掉的记录, 各个 FindMember 会在坏成员处
+                            //   返回 malformed, 字段读出来全是空 —— 静默回写就等于把用户的字段
+                            //   抹掉; 若它恰好被判成"旧版畸形记录", 整段非法字节还会被原样写进
+                            //   新存档, 让整个文件对所有第三方工具都不可解析。
+                            //   宁可明确报"基底受损、中止不写盘", 也不做这种静默改写。
+                            if(!efjson::IsStrictJsonValue(item)){ ++recordsBadSyntax; return; }
+
                             // id: 接受字符串与数字两种形态, 整串必须解析干净 (见 ReadIntegerField)。
                             long long pid = 0, pts = 0;
                             bool idPresent = false;
@@ -613,6 +638,8 @@ inline NSString* NSStr(std::string_view sv){
                             //   而且没有回迁路径。改用三态语义: 只有【键确实不存在, 或值是空字符串】
                             //   才算"没有"; 值是数字/布尔/对象说明这是别人写的真实记录, 照常当抽卡读。
                             //   再把 item_name 一并纳入 —— 旧版畸形记录连名字都没有。
+                            //   (记录本身的语法完整性已在回调开头统一校验过, 所以这里
+                            //    FindMember 不可能返回 malformed, 三态里只剩"有值 / 没有"。)
                             auto fieldAbsentOrEmpty = [](std::string_view obj, std::string_view key){
                                 const JsonValueRef v = FindTopLevelValue2(obj, key);
                                 if(v.kind == JsonValueKind::None || v.kind == JsonValueKind::Null) return true;
@@ -631,7 +658,9 @@ inline NSString* NSStr(std::string_view sv){
                                 return;
                             }
 
-                            std::string_view it2 = ExtractJsonValue2(item, "item_type", true);
+                            // 全部按本层 + kind 取原文 (见 ReadTextField): 第三方文件把
+                            // rank_type / is_new 写成 JSON 数字或布尔都能读进来, 不会静默变空。
+                            const std::string_view it2 = ReadTextField(item, "item_type");
                             FItemType ftype = (it2=="Character") ? FItemType::Character
                                             : (it2=="Weapon")    ? FItemType::Weapon
                                                                  : FItemType::Unknown;
@@ -639,14 +668,14 @@ inline NSString* NSStr(std::string_view sv){
                             rec.safe_id    = pid;
                             rec.timestamp  = pts;
                             rec.item_type  = ftype;
-                            rec.poolId     = ExtractJsonValue2(item, "gacha_type",  true);
-                            rec.item_id    = ExtractJsonValue2(item, "item_id",     true);
-                            rec.name       = ExtractJsonValue2(item, "item_name",   true);
-                            rec.rank_type  = ExtractJsonValue2(item, "rank_type",   true);
-                            rec.poolName   = ExtractJsonValue2(item, "pool_name",   true);
-                            rec.weaponType = ExtractJsonValue2(item, "weapon_type", true);
-                            rec.isNew  = (uint8_t)(ExtractJsonValue2(item, "is_new",  false)=="true" ? 1 : 0);
-                            rec.isFree = (uint8_t)(ExtractJsonValue2(item, "is_free", false)=="true" ? 1 : 0);
+                            rec.poolId     = ReadTextField(item, "gacha_type");
+                            rec.item_id    = ReadTextField(item, "item_id");
+                            rec.name       = ReadTextField(item, "item_name");
+                            rec.rank_type  = ReadTextField(item, "rank_type");
+                            rec.poolName   = ReadTextField(item, "pool_name");
+                            rec.weaponType = ReadTextField(item, "weapon_type");
+                            rec.isNew  = (uint8_t)(ReadTextField(item, "is_new")  == "true" ? 1 : 0);
+                            rec.isFree = (uint8_t)(ReadTextField(item, "is_free") == "true" ? 1 : 0);
                             m.records->push_back(std::move(rec));
                             m.localIds->insert(pid);
                         });
@@ -654,7 +683,8 @@ inline NSString* NSStr(std::string_view sv){
                         // Ok 之外的一切 (路径上任一环缺失/类型不对 / 数组没闭合 / 元素不是
                         // 对象) 都判加载失败。此前只要能定位到 "list" 就算加载成功, 于是被
                         // 截断的文件里"读到的那部分"会被当成完整历史写回去, 把尾巴永久抹掉。
-                        loaded = (pullScan == JsonArrayScan::Ok) && recordsMalformed == 0
+                        loaded = (pullScan == JsonArrayScan::Ok)
+                                 && recordsMalformed == 0 && recordsBadSyntax == 0
                                  && endfieldEntries <= 1;
 
                         // 非抽卡事件的往返读取, 同样按结构路径 —— 取【根对象本层】的
@@ -740,10 +770,19 @@ inline NSString* NSStr(std::string_view sv){
                           " 个元素 (多账号 UIGF 存档)。本工具只支持单账号: 继续写盘会把除第一个"
                           "账号之外的全部历史永久删除 (接口只保留最近 90 天), 故已中止。"
                           "请先把该文件按 UID 拆开, 再分别作为基底使用。";
-                } else if(recordsMalformed > 0){
-                    why = "基底文件里有 " + std::to_string(recordsMalformed) +
-                          " 条记录的 id / gacha_ts 读不出来 (缺失、类型不对, 或不是一个完整的整数)。"
-                          "id 同时是去重键, 读错会导致历史被重复追加并被以 \"0\" 回写覆盖, 故已中止。";
+                } else if(recordsBadSyntax > 0 || recordsMalformed > 0){
+                    why = "基底文件里有读不出来的记录: ";
+                    if(recordsBadSyntax > 0){
+                        why += std::to_string(recordsBadSyntax) +
+                               " 条记录本身不是合法的 JSON 对象 (例如缺少分隔逗号、尾逗号、"
+                               "非法转义或裸控制字符)";
+                    }
+                    if(recordsBadSyntax > 0 && recordsMalformed > 0) why += "; ";
+                    if(recordsMalformed > 0){
+                        why += std::to_string(recordsMalformed) +
+                               " 条记录的 id / gacha_ts 缺失、类型不对, 或不是一个完整的整数";
+                    }
+                    why += "。id 同时是去重键, 读错会导致历史被重复追加并被以 \"0\" 回写覆盖, 故已中止。";
                 } else {
                     why = "基底文件无法读取、为空, 或结构不是 UIGF v4.2 的 endfield[0].list 数组 "
                           "(键缺失、类型不对、被截断、含非对象元素或缺少分隔逗号)。";
@@ -876,17 +915,21 @@ inline NSString* NSStr(std::string_view sv){
         FetchSessionImpl& m = *_impl;
         const PoolCfg& pc = m.pools[m.poolIdx];
 
-        const bool midPool = (m.cnt > 0);   // 本池已吃进新记录 ⇒ 任何异常都可能留下永久缺口
-
         // ---- 异常的统一处置 (v0.1.5.1) ----
-        //   midPool: 本页之前已经吃进了本池的新记录。此时无论什么原因停下, 写出的文件都会是
+        //   m.cnt > 0: 本池已经吃进了新记录 (可能就是本页前半段吃进的)。此时无论什么原因停下,
+        //     写出的文件都会是
         //     "上面有新记录、中间缺一段、下面是老记录" —— 下次增量拉取在最新记录处即触达老记录
         //     而停, 缺口永远补不回来, 而接口只保留最近 90 天。所以一律 Fatal, 不写盘。
-        //   非 midPool 且该池标了 optional: 跳过本池、继续其余池, 并把池名记进 skippedPools
+        //   m.cnt == 0 且该池标了 optional: 跳过本池、继续其余池, 并把池名记进 skippedPools
         //     由摘要点名 (不静默)。这是为"服务端还不认识某个新池型"准备的 —— 见 PoolCfg::optional。
-        //   非 midPool 且必需池: 池级错误。协调器会据此整次中止 (保护已有数据)。
+        //   m.cnt == 0 且必需池: 池级错误。协调器会据此整次中止 (保护已有数据)。
+        //
+        //   ★ m.cnt 必须【在失败点现场求值】, 不能在方法入口拍快照: 记录数组的回调会边扫边
+        //     ++m.cnt, 而 pageScan/seqAnomaly 这两道闸门恰恰是在扫完之后才判的。用快照的话,
+        //     "本池第一页吃进了前 N 条、数组在后面才坏"会被当成"本池尚无部分状态"而跳池,
+        //     那 N 条随后照常落盘 —— 正是这套闸门要堵的缺口。
         auto problem = [&](const std::string& why) -> FetchPageOutcome * {
-            if (midPool) {
+            if (m.cnt > 0) {
                 _state = FetchState::Failed;
                 o.status = FetchIngestFatalError;
                 o.fatalErrorMessage = NSStr(why + " (翻页中途: 为避免记录缺口, 本次不写盘)");
@@ -968,6 +1011,7 @@ inline NSString* NSStr(std::string_view sv){
         if (structured) {
             const JsonValueRef lv = FindTopLevelValue2(host, "list");
             if (lv.kind == JsonValueKind::Array) { listStatus = LocateResult::Located; listText = lv.text; }
+            else if (lv.malformed) listStatus = LocateResult::Malformed;   // "读不出来" 不是 "没有"
             else if (lv.kind == JsonValueKind::None || lv.kind == JsonValueKind::Null)
                  listStatus = LocateResult::NotFound;
             else listStatus = LocateResult::Malformed;
@@ -976,6 +1020,11 @@ inline NSString* NSStr(std::string_view sv){
             if (hm.kind == JsonValueKind::Bool) { hasMoreKnown = true; hasMoreValue = (hm.text == "true"); }
             else if (hm.kind == JsonValueKind::String && (hm.text == "true" || hm.text == "false")) {
                 hasMoreKnown = true; hasMoreValue = (hm.text == "true");
+            } else if (hm.malformed) {
+                // 这一层根本读不下去 —— FindMember 此时返回 kind==None + malformed==true,
+                // 与"没有这个键"是两回事 (JsonScan.h 的三态契约)。并进静默分支就又变成
+                // "读不出来当没有", 所以单独按异常处理。
+                hasMoreBad = true;
             } else if (hm.kind != JsonValueKind::None && hm.kind != JsonValueKind::Null) {
                 hasMoreBad = true;   // 键在, 但既不是布尔也不是布尔字面量字符串
             }
@@ -983,6 +1032,20 @@ inline NSString* NSStr(std::string_view sv){
             const auto loc = efjson::LocateArrayFullText(rv, "list");
             listStatus = loc.first;
             listText   = loc.second;
+        }
+        // 结构路径没拿到记录数组时回退全文 —— 与 hasMore 同款。
+        // 现网的形状是 {code,msg,data:{list,hasMore}}, 也就是 structured 恒为 true; 如果接口
+        // 哪天把 list 再往里挪一层 (data.page.list), 只认 data 本层就会读到"这一页没有记录",
+        // 第 1 页因此按空池收尾并打印"完成, 新增 0 条" —— 六个池全这样就是静默 0 条照常写盘。
+        // 提交里承诺的"嵌套层级变化时回退全文"必须对现网形状也成立, 否则等于没有。
+        if (listStatus == LocateResult::NotFound) {
+            const auto loc = efjson::LocateArrayFullText(rv, "list");
+            if (loc.first != LocateResult::NotFound) { listStatus = loc.first; listText = loc.second; }
+        }
+        // 结构路径在 host 这一层没找到 hasMore 时, 回退到全文查找 —— 把查找范围钉死在
+        // root.data 收窄了兼容面 (接口完全可能把 list 放 data 里而 hasMore 留在 root),
+        // 而"读不到 hasMore"会被下面的闸门判成异常, 所以这里必须先把旧的宽松路径兜回来。
+        if (!hasMoreKnown && !hasMoreBad) {
             const std::string_view hm = ExtractJsonValue2(rv, "hasMore", false);
             if (hm == "true" || hm == "false") { hasMoreKnown = true; hasMoreValue = (hm == "true"); }
         }
@@ -1117,17 +1180,28 @@ inline NSString* NSStr(std::string_view sv){
         // ---- 结构异常的四道闸门 (v0.1.5.1) ----
         // 顺序要紧: 扫描一遇到非法元素就立刻返回, 后面的对象不会再回调, 所以 m.reached 为真
         // 必然发生在出错点【之前】—— 边界已经找到, 这一页尾巴坏不坏都不影响完整性, 走正常收尾。
+        // seqAnomaly 放在 m.reached 判定【之外】: 回调开头就有 if(m.reached) return;, 所以任何
+        // 被标记的异常记录一定是在触达本地老记录【之前】扫到的 —— 它比本地边界新, 却既没进
+        // records/events 也没报错。若放行, 下次增量拉取在最新记录处即停, 这一条永远补不回来。
+        if (seqAnomaly)
+            return problem("接口返回的记录缺少可用的 seqId (缺失, 或不是一个完整的整数)");
+
         if (!m.reached) {
             if (pageScan == JsonArrayScan::Malformed)
                 return problem("接口返回的记录数组结构异常 (未闭合、含非对象元素或缺少分隔逗号)");
-            if (seqAnomaly)
-                return problem("接口返回的记录缺少可用的 seqId (缺失, 或不是一个完整的整数)");
-            // 下面三条只在 midPool 才算异常: 本池第一页就"没有记录数组 / 空页"是空池的正常形态。
-            if (midPool && listStatus == LocateResult::NotFound)
+            // 下面几条只在"本池已有部分记录"时才算异常: 本池第一页就"没有记录数组 / 空页"
+            // 是空池的正常形态。同样现场求值 m.cnt。
+            if (m.cnt > 0 && listStatus == LocateResult::NotFound)
                 return problem("翻页中途返回的这一页里没有记录数组");
-            if (midPool && hasMoreBad)
+            if (m.cnt > 0 && hasMoreBad)
                 return problem("接口返回的 hasMore 字段类型异常 (既不是布尔也不是 true/false 字符串)");
-            if (midPool && itemsSeen == 0 && hasMoreKnown && hasMoreValue)
+            // hasMore 是翻页的唯一依据。读不到它却按"没有更多"收尾, 与 P1 描述的失败模式完全
+            // 同类 —— 本池在此静默截断, 更早的记录再也不拉。现行接口一直有这个字段 (结构路径
+            // 读不到时下面还会全文兜一次), 所以这条在正常情况下不会触发; 真触发了说明接口变了,
+            // 明确报错远好过悄悄少写一段。
+            if (m.cnt > 0 && itemsSeen > 0 && !hasMoreKnown)
+                return problem("接口返回的这一页里读不到 hasMore, 无法判断是否还有更早的记录");
+            if (m.cnt > 0 && itemsSeen == 0 && hasMoreKnown && hasMoreValue)
                 return problem("接口称仍有更早的记录, 却返回了空页");
         }
 
@@ -1259,11 +1333,18 @@ inline NSString* NSStr(std::string_view sv){
             // (例外: non_pull_events[].raw 里是服务器原始对象, 保持其原有的 camelCase,
             //  因为那一段是原样透传, 不做任何改写。)
             // ==========================================================
-            time_t t = exp_ts; struct tm tmv; localtime_r(&t, &tmv);
+            // 与 WriteTimeKV 同口径: 零初始化 + 检查返回值, 不在未初始化的 struct tm 上取字段。
+            time_t t = exp_ts;
+            struct tm tmv{};
+            const bool tmOk = (localtime_r(&t, &tmv) != nullptr);
             char tbuf[64];
-            int tl = snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
+            int tl = 0;
+            if (tmOk) {
+                tl = snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
                               tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
                               tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+            }
+            if (tl < 0) tl = 0;
 
             // ---- info 块 ----
             w.WriteLit("{\n    \"info\": {\n");
@@ -1284,7 +1365,7 @@ inline NSString* NSStr(std::string_view sv){
             w.WriteLit("\"\n    },\n");
 
             // ---- endfield 数组 (单账号 → 单元素) ----
-            int tzHours = (int)(tmv.tm_gmtoff / 3600);
+            const int tzHours = tmOk ? (int)(tmv.tm_gmtoff / 3600) : 0;
             w.WriteLit("    \"endfield\": [\n        {\n");
             w.WriteLit("            \"uid\": \"0\",\n");
             w.WriteLit("            \"timezone\": ");
@@ -1372,7 +1453,7 @@ inline NSString* NSStr(std::string_view sv){
         // "报告成功、原档已被替换、内容却是坏的"。
         // F_FULLFSYNC 是 Apple 平台上唯一能把数据真正刷到介质的请求; 它在某些文件系统上
         // 返回 ENOTSUP, 此时退回普通 fsync。
-        if (::fcntl(out.get(), F_FULLFSYNC) < 0 && ::fsync(out.get()) < 0) {
+        if (::fcntl(out.get(), F_FULLFSYNC, 0) < 0 && ::fsync(out.get()) < 0) {
             _state = FetchState::Failed;
             s.ok = NO; s.errorMessage = @"写入失败 (数据未能落盘)";
             return s;   // committed 仍为 false → ScopeExit 删掉临时文件

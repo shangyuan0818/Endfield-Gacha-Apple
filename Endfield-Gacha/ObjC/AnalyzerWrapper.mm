@@ -161,20 +161,25 @@ template<typename Cb>
 //   彻底消除"顶层成员顺序影响读取结果"这个问题; 没命中时退回原来的宽松路径, 保持兼容。
 // 返回值语义与 JsonArrayScan 一致: NotFound = 没有记录数组; Malformed = 找到了但结构坏了
 //   (截断 / 非对象元素 / 缺分隔逗号), 调用方必须据此报错而不是按残缺数据出统计。
+//
+// ★ 回退【只在文件根本没有 endfield 段时】发生。有 endfield 却读不出 endfield[0].list, 说明
+//   这是一份本工具/同类工具产出的 v4.2 文件而它坏了 —— 此时再去全文找 list, 首个匹配很可能
+//   落在 non_pull_events[].raw 里的数组上, 于是"读到 0 条"被当成"没有记录", 而导出器对同一
+//   份文件是明确中止不写盘的。两端必须同口径: 这种情况直接报结构损坏。
 template<typename Cb>
 [[nodiscard]] JsonArrayScan ReadUigfPullList(std::string_view doc, bool& usedStructuredPath, Cb&& cb) {
     usedStructuredPath = false;
     const JsonValueRef game = efjson::FindMember(doc, "endfield");
     if (game.kind == JsonValueKind::Array) {
+        usedStructuredPath = true;
         const JsonValueRef entry0 = efjson::FirstElement(game.text);
-        if (entry0.kind == JsonValueKind::Object) {
-            const JsonValueRef listV = efjson::FindMember(entry0.text, "list");
-            if (listV.kind == JsonValueKind::Array) {
-                usedStructuredPath = true;
-                return efjson::ForEachObjectIn(listV.text, std::forward<Cb>(cb));
-            }
-        }
+        if (entry0.kind != JsonValueKind::Object) return JsonArrayScan::Malformed;
+        const JsonValueRef listV = efjson::FindMember(entry0.text, "list");
+        if (listV.kind != JsonValueKind::Array)   return JsonArrayScan::Malformed;
+        return efjson::ForEachObjectIn(listV.text, std::forward<Cb>(cb));
     }
+    if (game.malformed) return JsonArrayScan::Malformed;   // 根对象本身读不下去
+    // 没有 endfield 段: 可能是 UIGF v3.0、别的游戏段或第三方扩展写法 —— 保持原来的宽松路径。
     return efjson::ForEachObjectByKey(doc, "list", std::forward<Cb>(cb));
 }
 

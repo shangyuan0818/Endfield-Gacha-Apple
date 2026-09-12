@@ -150,9 +150,10 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $isHovering) { providers in
             // 防御:正在处理时拒绝新拖入,避免双开 worker
             guard !isProcessing, let provider = providers.first else { return false }
-            let capturedChars = config.chars
+            // 排除法的两份名单走 effective* (空名单会让每一件六星都判成 UP, 见 AppConfig)
+            let capturedChars = config.effectiveChars
             let capturedPool  = config.pool
-            let capturedWeps  = config.weps
+            let capturedWeps  = config.effectiveWeps
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 // loadObject 回调可能在任意线程,统一切回主线程
@@ -177,7 +178,8 @@ struct ContentView: View {
                     self.isProcessing = true
                     self.analysis = nil
                     self.outputText = "拉取完成,正在分析 \(url.path)..."
-                    runAnalysis(url: url, chars: config.chars, pool: config.pool, weps: config.weps)
+                    runAnalysis(url: url, chars: config.effectiveChars,
+                                pool: config.pool, weps: config.effectiveWeps)
                 }
             }
         }

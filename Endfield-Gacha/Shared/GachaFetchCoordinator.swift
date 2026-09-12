@@ -66,7 +66,9 @@ extension FetchResult {
             lines.append("  (存放在 non_pull_events 键里, 不计入抽卡统计, 也不会被第三方 UIGF 工具当成抽卡)")
         }
         if migratedLegacyCount > 0 {
-            lines.append("其中 \(migratedLegacyCount) 条旧版误存在抽卡数组里的非抽卡事件已移出, 因此\"共计\"会比上次少 \(migratedLegacyCount) 条")
+            // 不要断言"共计会比上次少 N 条": 同一次拉取通常还新增了记录, 净变化多半是正的,
+            // 给一个能被上一行数字直接证伪的说法, 比不解释更让人以为丢了数据。
+            lines.append("其中 \(migratedLegacyCount) 条旧版误存在抽卡数组里的非抽卡事件已移出抽卡统计 (改存到 non_pull_events), \"共计\"因此少算这 \(migratedLegacyCount) 条")
         }
         if !skippedPoolNames.isEmpty {
             lines.append("已跳过的卡池: \(skippedPoolNames.joined(separator: "、"))")

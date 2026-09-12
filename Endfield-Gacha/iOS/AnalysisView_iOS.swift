@@ -165,9 +165,10 @@ struct AnalysisView_iOS: View {
         analysis = nil
         outputText = "正在分析 \(url.lastPathComponent)..."
 
-        let chars = config.chars
+        // 排除法的两份名单走 effective* (空名单会让每一件六星都判成 UP, 见 AppConfig)
+        let chars = config.effectiveChars
         let pool  = config.pool
-        let weps  = config.weps
+        let weps  = config.effectiveWeps
 
         DispatchQueue.global(qos: .userInitiated).async {
             // ── 为什么用 NSFileCoordinator 协调读 ────────────────────────

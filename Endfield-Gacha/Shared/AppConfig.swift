@@ -19,6 +19,22 @@ final class AppConfig {
     var pool:  String
     var weps:  String
 
+    // MARK: - 给分析用的有效值
+    //
+    // 「常驻六星角色」与「常驻六星武器」是【排除法】的依据: 不在名单里 = 当期 UP。
+    // 清空它们没有任何合法用途, 只会让每一件六星都判成 UP —— 武器池 UP 率恒为 100%,
+    // 辉光庆典把 5 名常驻全记成限定, 界面上没有任何提示。
+    // 兜底必须放在【取值处】而不是构造处: 放在 init 里的话, 用户在设置页清空后不重启就分析
+    // 仍然是空的, 而 macOS 根本不读盘 (persistenceEnabled == false), 那条兜底永远不会执行。
+    // 分析调用点一律读这两个属性, 不要直接读 chars / weps。
+    // (「当期 UP 角色」映射没有对应物: 空是它的合法降级形态 —— 退回常驻排除法。)
+    var effectiveChars: String {
+        chars.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultChars : chars
+    }
+    var effectiveWeps: String {
+        weps.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultWeps : weps
+    }
+
     // 常驻(基础寻访)六星角色。截至 2026-09-06 仍是这 5 人, 自公测以来【没有增补过】——
     // 每期「特许寻访」公告都带同一条条款:「※ 在「特许寻访」中概率提升的6星干员, 将于
     // 3次「特许寻访」结束后, 移出「特许寻访」全部可能出现的干员列表。移出后, 概率提升的
@@ -98,22 +114,36 @@ final class AppConfig {
     // 命中就整串换成当前默认值, 不做逐项合并。这些常量【必须与当年发布的字符串逐字一致】,
     // 改动它们等于改变对老用户的识别结果。
 
-    /// v0 = 0.1.3.x 的当期 UP 映射 (7 期)
-    private static let poolDefaultV0 = "熔火灼痕:莱万汀,轻飘飘的信使:洁尔佩塔,热烈色彩:伊冯,河流的女儿:汤汤,狼珀:洛茜,春雷动，万物生:庄方宜,拳出无悔:弭弗"
-    /// v0 = 0.1.3.x 的常驻六星武器名单 (含被误分类的【赤缨】)
-    private static let wepsDefaultV0 = "宏愿,不知归,黯色火炬,扶摇,热熔切割器,显赫声名,白夜新星,大雷斑,赫拉芬格,典范,昔日精品,破碎君王,J.E.T.,骁勇,负山,同类相食,楔子,领航者,骑士精神,遗忘,爆破单元,作品：蚀迹,沧溟星梦,光荣记忆,望乡,雾中微光,灯火使命,赤缨,幻想苦痛"
+    /// 0.1.3.x 的当期 UP 映射 (7 期)
+    private static let poolDefault_0_1_3 = "熔火灼痕:莱万汀,轻飘飘的信使:洁尔佩塔,热烈色彩:伊冯,河流的女儿:汤汤,狼珀:洛茜,春雷动，万物生:庄方宜,拳出无悔:弭弗"
+    /// 0.1.3.x 的常驻六星武器名单 (含被误分类的【赤缨】)
+    private static let wepsDefault_0_1_3 = "宏愿,不知归,黯色火炬,扶摇,热熔切割器,显赫声名,白夜新星,大雷斑,赫拉芬格,典范,昔日精品,破碎君王,J.E.T.,骁勇,负山,同类相食,楔子,领航者,骑士精神,遗忘,爆破单元,作品：蚀迹,沧溟星梦,光荣记忆,望乡,雾中微光,灯火使命,赤缨,幻想苦痛"
 
-    private static let legacyPoolDefaults = [poolDefaultV0]
-    private static let legacyWepsDefaults = [wepsDefaultV0]
+    /// 0.1.1 / 0.1.2 的当期 UP 映射 (6 期, 还没有「拳出无悔:弭弗」)
+    private static let poolDefault_0_1_1 = "熔火灼痕:莱万汀,轻飘飘的信使:洁尔佩塔,热烈色彩:伊冯,河流的女儿:汤汤,狼珀:洛茜,春雷动，万物生:庄方宜"
+    /// 0.1.1 / 0.1.2 的常驻六星武器名单 (还没有 雾中微光/灯火使命/赤缨/幻想苦痛)
+    ///
+    /// ★ 这一份必须收录, 否则从 0.1.1/0.1.2 直接升上来的用户会永远收不到武器名单的默认值更新:
+    ///   他们盘上那串既不等于当前默认值 (少三件), 又没有赤缨可删, 于是 v0→v1 原样返回、
+    ///   差量写把它当"用户自定义"永久留下 —— 正是本次要根除的那种失效模式。
+    ///   池映射侥幸没这个问题: 0.1.1 的那串是当前默认值的前 6 项且顺序一致, 补齐缺项后
+    ///   逐字等于当前默认值, 差量写会顺手把键删掉。但不能指望这种巧合, 所以两份都登记。
+    private static let wepsDefault_0_1_1 = "宏愿,不知归,黯色火炬,扶摇,热熔切割器,显赫声名,白夜新星,大雷斑,赫拉芬格,典范,昔日精品,破碎君王,J.E.T.,骁勇,负山,同类相食,楔子,领航者,骑士精神,遗忘,爆破单元,作品：蚀迹,沧溟星梦,光荣记忆,望乡"
+
+    private static let legacyPoolDefaults = [poolDefault_0_1_3, poolDefault_0_1_1]
+    private static let legacyWepsDefaults = [wepsDefault_0_1_3, wepsDefault_0_1_1]
     /// v0 → v1 的分类修正: 从武器白名单里移除的条目 (赤缨是 1.3 上半「绛结申领」的当期 UP)
     private static let wepsRemovedInV1: Set<String> = ["赤缨"]
 
     init() {
         let d = UserDefaults.standard
-        let storedChars = Self.persistenceEnabled ? d.string(forKey: Keys.chars) : nil
-        let storedPool  = Self.persistenceEnabled ? d.string(forKey: Keys.pool)  : nil
-        let storedWeps  = Self.persistenceEnabled ? d.string(forKey: Keys.weps)  : nil
-        let storedVersion = Self.persistenceEnabled ? d.integer(forKey: Keys.schema) : Self.currentSchemaVersion
+        // 显式标注类型: `cond ? optional : nil` 的三元表达式在推断上容易出问题, 不去赌它。
+        let storedChars: String? = Self.persistenceEnabled ? d.string(forKey: Keys.chars) : nil
+        let storedPool:  String? = Self.persistenceEnabled ? d.string(forKey: Keys.pool)  : nil
+        let storedWeps:  String? = Self.persistenceEnabled ? d.string(forKey: Keys.weps)  : nil
+        // 键缺失时 integer(forKey:) 返回 0 = 版本 v0。macOS 不读盘, 直接当作已是最新版本。
+        let storedVersion: Int = Self.persistenceEnabled ? d.integer(forKey: Keys.schema)
+                                                         : Self.currentSchemaVersion
 
         let m = Self.migrate(chars: storedChars, pool: storedPool, weps: storedWeps,
                              fromVersion: storedVersion)
@@ -123,12 +153,15 @@ final class AppConfig {
 
         // 只有【确实存过东西】的安装才写回。全新安装 / macOS 上没有任何 cfg.* 键,
         // 这里一个字节都不写, 于是"缺键 == 跟随默认值", 未来的默认值更新自动生效。
+        //
+        // 走 static 版本而不是调用实例方法 persist(): init 里调实例方法要求 self 已完全初始化,
+        // 而 @Observable 把这三个属性变成了计算属性 —— 不必去赌宏展开后的初始化时序。
+        // 不加 `if changed` 这道条件: 即使迁移一个字都没改, 也要跑一次差量写 —— 它会把
+        // "内容恰好等于当前默认值"的冗余键删掉, 从而真正建立起"缺键 == 跟随默认值"这个不变量。
+        // 少了这一步, 那批用户的 schemaVersion 已经被盖成 1, 以后的默认值更新对他们永远不可见。
         guard Self.persistenceEnabled,
               storedChars != nil || storedPool != nil || storedWeps != nil else { return }
-        if m.changed { persist() }
-        if storedVersion != Self.currentSchemaVersion {
-            d.set(Self.currentSchemaVersion, forKey: Keys.schema)
-        }
+        Self.writeBack(chars: m.chars, pool: m.pool, weps: m.weps)
     }
 
     // MARK: - 迁移
@@ -162,21 +195,20 @@ final class AppConfig {
                                                          : mergingMissingPoolEntries(into: p, from: defaultPool)
             }
             if let w = weps, !w.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                outWeps = legacyWepsDefaults.contains(w) ? defaultWeps
-                                                         : removingEntries(wepsRemovedInV1, from: w)
+                // 与 pool 对称: 先按修正表删掉分类错误的条目, 再补上用户没有的默认条目。
+                // 只删不补的话, 将来往 defaultWeps 里新增一件常驻六星武器时, 改过名单的用户
+                // 永远收不到 —— 名单里少一件, 抽到它就被记成当期 UP, 武器池 UP 率被抬高。
+                outWeps = legacyWepsDefaults.contains(w)
+                        ? defaultWeps
+                        : mergingMissingEntries(into: removingEntries(wepsRemovedInV1, from: w),
+                                                from: defaultWeps)
             }
             // chars 的默认值在 v0→v1 没有变化, 无需迁移步骤。
         }
 
-        // ---- 有效性兜底 (与版本无关, 每次启动都查) ----
-        // 「常驻六星角色」与「常驻六星武器」这两份名单是【排除法】的依据: 不在名单里 = 当期 UP。
-        // 清空它们没有任何合法用途, 只会让每一件六星都被判成 UP —— 武器池 UP 率恒为 100%,
-        // 辉光庆典把 5 名常驻全记成限定, 界面上没有任何提示, 重启也不自愈。
-        // (`?? default` 只兜 nil 不兜空串, 而设置页的 TextEditor 一旦被全选删掉, 切走时
-        //  persist() 就会把空串存下来。) 清空即视为"恢复默认", 用户仍可随时改成别的内容。
-        // 「当期 UP 角色」映射不在此列: 空是它的合法降级形态 (退回常驻排除法)。
-        if outChars.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { outChars = defaultChars }
-        if outWeps.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty  { outWeps  = defaultWeps  }
+        // 注: 名单被清空的兜底【不在这里】做 —— 改写用户输入会让他在设置页看到自己删掉的
+        // 内容又长回来, 而且 macOS 压根不读盘, 放在这里覆盖不到。兜底放在取值处的
+        // effectiveChars / effectiveWeps, 见文件开头。
 
         let changed = (chars != nil && outChars != chars!)
                    || (pool  != nil && outPool  != pool!)
@@ -223,8 +255,22 @@ final class AppConfig {
         return trimmed.hasSuffix(",") ? trimmed + tail : trimmed + "," + tail
     }
 
-    /// 从逗号分隔名单里删掉指定条目, 其余顺序原样保留。没有要删的就返回原串
-    /// (返回原串很重要: changed 判定据此决定要不要写盘)。
+    /// 把默认名单里【用户没有的条目】追加到末尾 (与 mergingMissingPoolEntries 同口径,
+    /// 只是没有"键:值"结构)。用户已有的条目与顺序一律不动。
+    static func mergingMissingEntries(into userText: String, from defaultsText: String) -> String {
+        let existing = Set(userText.split(separator: ",", omittingEmptySubsequences: false)
+                                   .map { $0.trimmingCharacters(in: asciiTrimSet) })
+        let missing = defaultsText.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: asciiTrimSet) }
+            .filter { !$0.isEmpty && !existing.contains($0) }
+        guard !missing.isEmpty else { return userText }
+        let tail = missing.joined(separator: ",")
+        let trimmed = userText.trimmingCharacters(in: asciiTrimSet)
+        if trimmed.isEmpty { return tail }
+        return trimmed.hasSuffix(",") ? trimmed + tail : trimmed + "," + tail
+    }
+
+    /// 从逗号分隔名单里删掉指定条目, 其余顺序原样保留。没有要删的就返回原串。
     static func removingEntries(_ drop: Set<String>, from text: String) -> String {
         let parts = text.split(separator: ",", omittingEmptySubsequences: false)
         let kept = parts.filter { !drop.contains($0.trimmingCharacters(in: asciiTrimSet)) }
@@ -243,14 +289,25 @@ final class AppConfig {
     /// 无法区分。结果是此后每次版本更新的新 UP 映射对老用户 100% 不可见。
     /// 改成差量写之后,"缺键"重新等价于"跟随默认值", 默认值更新自动生效。
     func persist() {
-        guard Self.persistenceEnabled else { return }
+        Self.writeBack(chars: chars, pool: pool, weps: weps)
+    }
+
+    /// 差量写的实际实现 (init 与 persist 共用)。
+    /// 值等于当前默认值 ⇒ 删键; 只有真正被改过的键才落盘。
+    private static func writeBack(chars: String, pool: String, weps: String) {
+        guard persistenceEnabled else { return }
         let d = UserDefaults.standard
         func put(_ value: String, _ key: String, default def: String) {
             if value == def { d.removeObject(forKey: key) } else { d.set(value, forKey: key) }
         }
-        put(chars, Keys.chars, default: Self.defaultChars)
-        put(pool,  Keys.pool,  default: Self.defaultPool)
-        put(weps,  Keys.weps,  default: Self.defaultWeps)
-        d.set(Self.currentSchemaVersion, forKey: Keys.schema)
+        put(chars, Keys.chars, default: defaultChars)
+        put(pool,  Keys.pool,  default: defaultPool)
+        put(weps,  Keys.weps,  default: defaultWeps)
+        // 版本号【只向上写】。用户从更高版本回退 (TestFlight 回滚 / 来回装) 时, 盘上的版本
+        // 可能比本版还高; 盖低之后, 那些已经跑过的高版本迁移步骤会在再次升级时重跑一遍,
+        // 而"用户故意删掉的默认映射只补回来一次"这条取舍正是挂在版本号上的。
+        if d.integer(forKey: Keys.schema) < currentSchemaVersion {
+            d.set(currentSchemaVersion, forKey: Keys.schema)
+        }
     }
 }

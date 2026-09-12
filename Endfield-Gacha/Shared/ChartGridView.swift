@@ -1282,18 +1282,29 @@ struct MRLCanvas: View {
             if yVal <= 0 && censored < empMRL.count && empMRL[censored] > 0 {
                 yVal = empMRL[censored]
             }
-            guard yVal > 0 else { return nil }
-            let top = pt(censored, yVal)
+            // v0.1.5.1: 取不到 y 值时【不再整块放弃】。
+            //   censored 超过 theoryCap 时理论分支被挡掉, 而经验 MRL 在没有观测的 x 上是 0,
+            //   于是竖线与标注一起消失, 可同一屏的文字统计和 iOS 详情卡还在显示这个"已垫 N 抽" ——
+            //   两处自相矛盾。重构寻访把这个门槛从 251 降到了 131 (系列的 120 兜底一旦用掉,
+            //   up_pity 就再无上限), 长干时很容易撞上。
+            //   现在退化成"整条高度的竖线 + 只报已垫抽数": 位置是可信的, 只是没有可信的
+            //   "预期还需" —— 说不出来就不说, 而不是连位置一起藏掉。
+            let top: CGPoint
+            let text: String
+            if yVal > 0 {
+                top = pt(censored, yVal)
+                text = String(format: "已垫 %d 抽 · 预期还需 %.1f", censored, yVal)
+            } else {
+                top = CGPoint(x: pt(censored, 0).x, y: plotY)
+                text = String(format: "已垫 %d 抽 · 超出理论曲线范围", censored)
+            }
             let bottom = CGPoint(x: top.x, y: plotY + plotH)
             var line = Path()
             line.move(to: top)
             line.addLine(to: bottom)
             ctx.stroke(line, with: .color(color),
                        style: StrokeStyle(lineWidth: 1.4, dash: [4, 3]))
-            return CensoredEntry(
-                text: String(format: "已垫 %d 抽 · 预期还需 %.1f", censored, yVal),
-                color: color
-            )
+            return CensoredEntry(text: text, color: color)
         }
         if let e = resolveAndDrawLine(censored: censored_all,
                                       empMRL: mrlAll.mrl,
