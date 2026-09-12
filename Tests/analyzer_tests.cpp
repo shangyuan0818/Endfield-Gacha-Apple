@@ -45,18 +45,30 @@ int main() {
     // ---------- 一、理论 CDF 的期望值 ----------
     // 前四个是迁移前就有的, 必须一位不动 (回归); 后两个是重构寻访新增, 与 Windows 端
     // v0.1.4.0 注释里标注的 51.37 / 77.83 对齐。
-    std::printf("[CDF] char=%.4f charUP=%.4f wep=%.4f wepUP=%.4f refac=%.4f refacUP=%.4f jointTail=%.4f\n",
+    //
+    // 参考值【不是四舍五入到小数点后四位的展示值】, 而是本实现算出来的原值截到 10 位小数,
+    // 误差限 kCdfTol = 1e-9。这样"期望值被改动了"才真的会红 —— 1e-3 的松限把整个第四位
+    // 都放走了, 而概率表改错不会崩溃, 只会让界面上的数字悄悄变成另一个游戏的数字。
+    // 量化一下这个差别: 把基础出货率 0.008 写成 0.0080001, 角色池期望值从 51.8051403653
+    // 变成 51.8049557016 (偏移 1.8e-4) —— 旧的 1e-3 松限【放得过去】, 现在这条会红。
+    //
+    // 1e-9 是有意留的余量, 不是精度上限: 实测 clang++ (-O0 / -O2 / -O3 -ffp-contract=fast /
+    // -O2 -ffp-contract=off) 与 g++ (-O2) 共 5 种构建下这七个值【逐位相同】, 与参考值的偏差
+    // ≤ 5e-11 (全部来自参考值自身的截断)。剩下的量级留给不同 libm 的 std::pow 可能相差
+    // 1 ulp —— 那点差异传播到期望值也只有 ~1e-14。
+    constexpr double kCdfTol = 1e-9;
+    std::printf("[CDF] char=%.10f charUP=%.10f wep=%.10f wepUP=%.10f refac=%.10f refacUP=%.10f jointTail=%.10f\n",
                 expectation(g_cdf_char, 82), expectation(g_cdf_char_up, 122),
                 expectation(g_cdf_wep, 41),  expectation(g_cdf_wep_up, 81),
                 expectation(g_cdf_refactor, 82), expectation(g_cdf_refactor_up, 122),
                 g_joint_tail_mean_excess);
-    CHECK(std::abs(expectation(g_cdf_char, 82)        - 51.8051) < 1e-3);
-    CHECK(std::abs(expectation(g_cdf_char_up, 122)    - 79.2914) < 1e-3);
-    CHECK(std::abs(expectation(g_cdf_wep, 41)         - 19.1711) < 1e-3);
-    CHECK(std::abs(expectation(g_cdf_wep_up, 81)      - 54.7370) < 1e-3);
-    CHECK(std::abs(expectation(g_cdf_refactor, 82)    - 51.3708) < 1e-3);
-    CHECK(std::abs(expectation(g_cdf_refactor_up, 122)- 77.8275) < 1e-3);
-    CHECK(std::abs(g_joint_tail_mean_excess           - 84.3666) < 1e-3);
+    CHECK(std::abs(expectation(g_cdf_char, 82)        - 51.8051403653) < kCdfTol);
+    CHECK(std::abs(expectation(g_cdf_char_up, 122)    - 79.2913726765) < kCdfTol);
+    CHECK(std::abs(expectation(g_cdf_wep, 41)         - 19.1710866709) < kCdfTol);
+    CHECK(std::abs(expectation(g_cdf_wep_up, 81)      - 54.7370066515) < kCdfTol);
+    CHECK(std::abs(expectation(g_cdf_refactor, 82)    - 51.3708153552) < kCdfTol);
+    CHECK(std::abs(expectation(g_cdf_refactor_up, 122)- 77.8274947999) < kCdfTol);
+    CHECK(std::abs(g_joint_tail_mean_excess           - 84.3666393185) < kCdfTol);
     // 单调性 + 收敛
     for (int i = 1; i <= 80; ++i)  CHECK(g_cdf_refactor[i]    >= g_cdf_refactor[i-1]);
     for (int i = 1; i <= 120; ++i) CHECK(g_cdf_refactor_up[i] >= g_cdf_refactor_up[i-1]);
