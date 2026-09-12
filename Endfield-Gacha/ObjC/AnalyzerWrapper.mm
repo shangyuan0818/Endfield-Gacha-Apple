@@ -178,7 +178,11 @@ template<typename Cb>
         if (listV.kind != JsonValueKind::Array)   return JsonArrayScan::Malformed;
         return efjson::ForEachObjectIn(listV.text, std::forward<Cb>(cb));
     }
-    if (game.malformed) return JsonArrayScan::Malformed;   // 根对象本身读不下去
+    // 回退【只允许在 endfield 这个键根本不存在时】发生。
+    //   "endfield": null / {} / "bad" 都不是"没有这个段", 而是"这个段写坏了" —— 此时再去全文
+    //   找 list, 首个匹配很可能落到 non_pull_events[].raw 里的数组上, 于是拿事件原文当抽卡
+    //   记录出统计。上一版只挡了 malformed, 漏了这三种"合法 JSON 但类型不对"的形态。
+    if (game.kind != JsonValueKind::None || game.malformed) return JsonArrayScan::Malformed;
     // 没有 endfield 段: 可能是 UIGF v3.0、别的游戏段或第三方扩展写法 —— 保持原来的宽松路径。
     return efjson::ForEachObjectByKey(doc, "list", std::forward<Cb>(cb));
 }

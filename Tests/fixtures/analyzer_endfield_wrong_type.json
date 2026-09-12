@@ -1,0 +1,21 @@
+{
+  "endfield": null,
+  "non_pull_events": [
+    {
+      "id": "99",
+      "raw": {
+        "list": [
+          {
+            "id": "101",
+            "gacha_ts": "1",
+            "item_id": "test",
+            "item_name": "UP",
+            "rank_type": "6",
+            "item_type": "Character",
+            "gacha_type": "special_test"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# 测试的中间产物 (Tests/run.sh 生成, 每次可重建)
+Tests/build/

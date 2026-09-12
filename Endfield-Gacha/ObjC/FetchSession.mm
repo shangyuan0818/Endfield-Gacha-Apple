@@ -96,10 +96,13 @@ template<typename Cb>
 // 直接返回空 -> 解析成 0; (b) "12ab" 被 from_chars 吃成 12; (c) 超 int64 时 from_chars 不写出参,
 // 仍是 0。id 同时是去重键, 塌成 0 之后 "触达本地老记录" 永不触发, 整段历史会被重复追加,
 // 而且会被以 "id":"0" 回写, 原 id 永久覆盖。这个函数把三种情况统一变成"读不出来"。
+// present 的语义是【这个键存在】(不含 null), 而不是"类型对不对" —— 两者必须分开:
+//   调用方用 `!ok && present` 表达"写了就必须能解析"。若把 present 定义成"是字符串或数字",
+//   那 "gacha_ts": true 会得到 ok=false, present=false, 调用方看成"没写"而放行, 时间戳静默留 0。
 inline bool ReadIntegerField(std::string_view obj, std::string_view key, long long& out, bool& present) {
     const JsonValueRef v = efjson::FindMember(obj, key);
-    present = (v.kind == JsonValueKind::String || v.kind == JsonValueKind::Number);
-    if (!present) return false;
+    present = (v.kind != JsonValueKind::None && v.kind != JsonValueKind::Null);
+    if (v.kind != JsonValueKind::String && v.kind != JsonValueKind::Number) return false;
     return efjson::ParseFullInt64(v.text, out);
 }
 
@@ -115,6 +118,140 @@ inline std::string_view ReadTextField(std::string_view obj, std::string_view key
     if (v.kind == JsonValueKind::String || v.kind == JsonValueKind::Number ||
         v.kind == JsonValueKind::Bool) return v.text;
     return {};
+}
+
+
+// ============================================================
+//  可单独测试的两段"定位"逻辑 (v0.1.5.2)
+//
+//  它们原本内联在 prepare / ingestResponseData 里, 而那两处是 ObjC 方法, 在没有 Apple SDK
+//  的机器上编译不了 —— 想验证"哪些输入会被接受"就只能把逻辑抄一份到测试里, 抄的那份迟早
+//  与真实实现分叉。提成命名空间级的纯函数之后, Tests/ 下的用例直接调用【同一份实现】。
+// ============================================================
+
+// 存档 (UIGF v4.2) 里抽卡记录数组的定位结果。
+struct UigfListLocation {
+    bool             endfieldPresent = false;  // 根对象里有没有 "endfield" 这个键
+    bool             endfieldIsArray = false;
+    JsonArrayScan    endfieldScan    = JsonArrayScan::NotFound;  // 外层数组【自身】扫完了吗
+    size_t           endfieldEntries = 0;      // 账号个数 (本工具只支持 1)
+    bool             usable          = false;  // 外层完整且恰好一个账号
+    LocateResult     listStatus      = LocateResult::NotFound;
+    std::string_view listText;
+};
+
+// 定位 根.endfield[0].list。
+//   ★ 外层 endfield 数组自身的扫描结果必须一并带出来: 丢掉它就等于"只要能数出第一项就继续",
+//     而 [账号A, null, 账号B] 与 [账号A 账号B] (缺逗号) 都会在第一项之后判 Malformed、计数
+//     停在 1 —— "元素数 <= 1" 因此成立, 于是只加载账号 A, 覆盖写盘时账号 B 的历史就没了。
+inline UigfListLocation LocateUigfPullList(std::string_view doc) {
+    UigfListLocation out;
+    const JsonValueRef gameV = FindTopLevelValue2(doc, "endfield");
+    out.endfieldPresent = (gameV.kind != JsonValueKind::None) || gameV.malformed;
+    out.endfieldIsArray = (gameV.kind == JsonValueKind::Array);
+    if (out.endfieldIsArray) {
+        out.endfieldScan = ForEachObjectInArray2(gameV.text,
+                               [&out](std::string_view){ ++out.endfieldEntries; });
+    } else if (gameV.malformed) {
+        out.endfieldScan = JsonArrayScan::Malformed;
+    }
+    out.usable = (out.endfieldScan == JsonArrayScan::Ok && out.endfieldEntries == 1);
+    if (!out.usable) return out;
+
+    const JsonValueRef entry0 = FirstArrayElement2(gameV.text);
+    if (entry0.kind != JsonValueKind::Object) { out.listStatus = LocateResult::Malformed; return out; }
+    const JsonValueRef listV = FindTopLevelValue2(entry0.text, "list");
+    if (listV.kind == JsonValueKind::Array) { out.listStatus = LocateResult::Located; out.listText = listV.text; }
+    else if (listV.malformed)               { out.listStatus = LocateResult::Malformed; }
+    else if (listV.kind == JsonValueKind::None || listV.kind == JsonValueKind::Null)
+                                            { out.listStatus = LocateResult::NotFound; }
+    else                                    { out.listStatus = LocateResult::Malformed; }
+    return out;
+}
+
+// 一页接口响应的"信封": 完整性、业务码、记录数组位置、hasMore。
+struct PageEnvelope {
+    bool             complete   = false;   // 整段正文是一个完整闭合的 JSON 对象
+    bool             codeFound  = false;
+    std::string_view code;
+    std::string_view msg;
+    LocateResult     listStatus = LocateResult::NotFound;
+    std::string_view listText;
+    bool             hasMoreKnown = false;
+    bool             hasMoreValue = false;
+    bool             hasMoreBad   = false;  // 键在, 但读不出来 / 不是布尔
+};
+
+// 解析一页响应的信封。只读不写, 没有副作用 —— 便于直接单测。
+//
+// hasMore 只按【某个对象的本层】读, 绝不全文查找:
+//   全文查找会把 list 元素 (或事件原文) 里同名的 hasMore 一并看见。构造一个根对象写
+//   "hasMore": true、而某条记录里嵌着 "hasMore": false 的合法响应, 仅仅把根对象的 hasMore
+//   挪到 data 后面 (不改任何值), 全文首个匹配就从 true 变成 false, 本池随即被判"正常结束"
+//   —— 而 JSON 对象的成员顺序本来就不该有语义。
+inline PageEnvelope InspectPageEnvelope(std::string_view rv) {
+    PageEnvelope pi;
+    pi.complete = efjson::IsCompleteObjectDocument(rv);
+    if (!pi.complete) return pi;
+
+    // code / msg: 结构化优先, 读不到再回退全文 (接口将来改变嵌套层级时不至于整个拉不动)。
+    {
+        const JsonValueRef cv = FindTopLevelValue2(rv, "code");
+        if (cv.kind == JsonValueKind::String || cv.kind == JsonValueKind::Number) pi.code = cv.text;
+        else pi.code = ExtractJsonValue2(rv, "code", false);
+        pi.codeFound = !pi.code.empty();
+        const JsonValueRef mv = FindTopLevelValue2(rv, "msg");
+        pi.msg = (mv.kind == JsonValueKind::String) ? mv.text : ExtractJsonValue2(rv, "msg", true);
+    }
+
+    // 只要 root.data (或 root 本身) 是对象, 就按本层读 list / hasMore。
+    std::string_view host;
+    bool structured = false;
+    {
+        const JsonValueRef dataV = FindTopLevelValue2(rv, "data");
+        if (dataV.kind == JsonValueKind::Object) { host = dataV.text; structured = true; }
+        else if (FindTopLevelValue2(rv, "list").kind == JsonValueKind::Array) { host = rv; structured = true; }
+    }
+
+    auto readHasMore = [&pi](std::string_view obj) {
+        if (pi.hasMoreKnown || pi.hasMoreBad) return;
+        const JsonValueRef hm = FindTopLevelValue2(obj, "hasMore");
+        if (hm.kind == JsonValueKind::Bool) { pi.hasMoreKnown = true; pi.hasMoreValue = (hm.text == "true"); }
+        else if (hm.kind == JsonValueKind::String && (hm.text == "true" || hm.text == "false")) {
+            pi.hasMoreKnown = true; pi.hasMoreValue = (hm.text == "true");
+        } else if (hm.malformed) {
+            // 这一层根本读不下去 —— FindMember 此时返回 kind==None + malformed==true, 与
+            // "没有这个键"是两回事 (JsonScan.h 的三态契约)。并进静默分支就又成了"读不出来当没有"。
+            pi.hasMoreBad = true;
+        } else if (hm.kind != JsonValueKind::None && hm.kind != JsonValueKind::Null) {
+            pi.hasMoreBad = true;   // 键在, 但既不是布尔也不是布尔字面量字符串
+        }
+    };
+
+    if (structured) {
+        const JsonValueRef lv = FindTopLevelValue2(host, "list");
+        if (lv.kind == JsonValueKind::Array) { pi.listStatus = LocateResult::Located; pi.listText = lv.text; }
+        else if (lv.malformed)               { pi.listStatus = LocateResult::Malformed; }
+        else if (lv.kind == JsonValueKind::None || lv.kind == JsonValueKind::Null)
+                                             { pi.listStatus = LocateResult::NotFound; }
+        else                                 { pi.listStatus = LocateResult::Malformed; }
+        readHasMore(host);
+    } else {
+        const auto loc = efjson::LocateArrayFullText(rv, "list");
+        pi.listStatus = loc.first;
+        pi.listText   = loc.second;
+    }
+    // host 那一层没有 hasMore 时, 再看【根对象本层】—— 这正是要兼容的"list 在 data 里、
+    // hasMore 留在根对象"那种形状。host == rv 时这次查询是重复的, 无害。
+    readHasMore(rv);
+    // 结构路径没拿到记录数组时回退全文。现网形状是 {code,msg,data:{list,hasMore}}, 也就是
+    // structured 恒为 true; 接口若把 list 再往里挪一层 (data.page.list), 只认 data 本层就会
+    // 读到"这一页没有记录", 第 1 页因此按空池收尾 —— 六个池全这样就是静默 0 条照常写盘。
+    if (pi.listStatus == LocateResult::NotFound) {
+        const auto loc = efjson::LocateArrayFullText(rv, "list");
+        if (loc.first != LocateResult::NotFound) { pi.listStatus = loc.first; pi.listText = loc.second; }
+    }
+    return pi;
 }
 
 inline std::string_view ExtractUrlParam(std::string_view url, std::string_view key){
@@ -557,6 +694,11 @@ inline NSString* NSStr(std::string_view sv){
             size_t recordsMalformed = 0;    // id / gacha_ts 读不出来的条数
             size_t recordsBadSyntax  = 0;    // 整条记录本身就不是合法 JSON 对象的条数
             size_t endfieldEntries  = 0;     // endfield 数组的元素个数 (多账号存档要拒绝)
+            // 外层 endfield 数组【自身】的扫描结果。丢掉它就等于"只要能数出第一项就继续":
+            //   [账号A, null, 账号B] 与 [账号A 账号B] (缺逗号) 都会在第一项之后判 Malformed,
+            //   计数停在 1, 于是"元素数 <= 1"成立、照常只加载账号 A —— 随后覆盖写盘时账号 B
+            //   的历史就没了。必须与内层 list 同等对待。
+            JsonArrayScan endfieldScan = JsonArrayScan::NotFound;
             ScopedFd in(::open(m.existFile.c_str(), O_RDONLY));   // RAII: 任何分支/异常都会关闭 fd
             if(in){
                 struct stat st{};
@@ -582,22 +724,16 @@ inline NSString* NSStr(std::string_view sv){
                         // 首个匹配就落到 raw 里那个空数组上 —— 抽卡记录一条都读不到, 却
                         // 一路"正常", 写盘时把它们全删了。事件键同理会被
                         // {"x":{"non_pull_events":[]}} 这类嵌套同名键遮住。
+                        // 定位走 LocateUigfPullList (同一份实现也被 Tests/ 直接调用, 见该函数注释)。
+                        // UIGF v4 的游戏数组是【每个 UID 一个元素】, 多账号合并文件很常见;
+                        // 本工具只支持单账号, 所以外层必须完整扫完且恰好一个账号才继续往里读 ——
+                        // 只读出其中一部分再覆盖写盘, 会把其余账号的历史永久删除。
                         JsonArrayScan pullScan = JsonArrayScan::Malformed;
-                        const JsonValueRef gameV = FindTopLevelValue2(bv, "endfield");
-                        // v0.1.5.1: 先数一下 endfield 有几个元素。UIGF v4 的游戏数组是【每个 UID
-                        //   一个元素】, 多账号合并文件很常见; 旧写法只取第 0 个就当"加载成功",
-                        //   随后 writeExport 固定写出单元素数组, 第 2 个账号的历史会被静默永久删除
-                        //   (接口只保留 90 天, 删了就没了)。本工具目前只支持单账号, 所以宁可明确
-                        //   拒绝, 也不能悄悄吞掉。
-                        if(gameV.kind == JsonValueKind::Array){
-                            (void)ForEachObjectInArray2(gameV.text, [&](std::string_view){ ++endfieldEntries; });
-                        }
-                        const JsonValueRef entry0 = (gameV.kind == JsonValueKind::Array)
-                                                  ? FirstArrayElement2(gameV.text) : JsonValueRef{};
-                        const JsonValueRef listV = (entry0.kind == JsonValueKind::Object && endfieldEntries <= 1)
-                                                 ? FindTopLevelValue2(entry0.text, "list") : JsonValueRef{};
-                        if(listV.kind == JsonValueKind::Array){
-                        pullScan = ForEachObjectInArray2(listV.text, [&](std::string_view item){
+                        const UigfListLocation loc = LocateUigfPullList(bv);
+                        endfieldScan    = loc.endfieldScan;
+                        endfieldEntries = loc.endfieldEntries;
+                        if(loc.listStatus == LocateResult::Located){
+                        pullScan = ForEachObjectInArray2(loc.listText, [&](std::string_view item){
                             // v0.1.5.1: 每条记录先过一次【完整语法校验】。ForEachObjectInArray2
                             //   只保证元素的括号配对, 元素内部的成员层没有校验; 而下面所有字段
                             //   读取都假设这条记录是完整可读的。一条 {"id":"1","item_id":} 这样
@@ -685,7 +821,7 @@ inline NSString* NSStr(std::string_view sv){
                         // 截断的文件里"读到的那部分"会被当成完整历史写回去, 把尾巴永久抹掉。
                         loaded = (pullScan == JsonArrayScan::Ok)
                                  && recordsMalformed == 0 && recordsBadSyntax == 0
-                                 && endfieldEntries <= 1;
+                                 && endfieldScan == JsonArrayScan::Ok && endfieldEntries == 1;
 
                         // 非抽卡事件的往返读取, 同样按结构路径 —— 取【根对象本层】的
                         // non_pull_events。旧版文件没有这个键 = 0 条, 属正常情况, 不能影响
@@ -765,11 +901,18 @@ inline NSString* NSStr(std::string_view sv){
                 // 分因说明: 多账号存档与"记录读不出来"是两种完全不同的处置, 混成一句
                 // 用户没法判断该怎么办。
                 std::string why;
-                if(endfieldEntries > 1){
+                if(endfieldScan == JsonArrayScan::Malformed){
+                    why = "基底文件的 endfield 数组结构异常 (未闭合、含非对象元素, 或元素之间缺少"
+                          "分隔逗号)。这类文件很可能是多账号合并的产物, 只读出其中一部分再覆盖"
+                          "写盘会把其余账号的历史永久删除 (接口只保留最近 90 天), 故已中止。";
+                } else if(endfieldEntries > 1){
                     why = "基底文件的 endfield 数组有 " + std::to_string(endfieldEntries) +
                           " 个元素 (多账号 UIGF 存档)。本工具只支持单账号: 继续写盘会把除第一个"
                           "账号之外的全部历史永久删除 (接口只保留最近 90 天), 故已中止。"
                           "请先把该文件按 UID 拆开, 再分别作为基底使用。";
+                } else if(endfieldScan == JsonArrayScan::NotFound){
+                    why = "基底文件里没有可用的 endfield 数组 (键缺失, 或值不是数组)。"
+                          "本工具只认 UIGF v4.2 的 endfield[0].list 结构。";
                 } else if(recordsBadSyntax > 0 || recordsMalformed > 0){
                     why = "基底文件里有读不出来的记录: ";
                     if(recordsBadSyntax > 0){
@@ -969,86 +1112,24 @@ inline NSString* NSStr(std::string_view sv){
         // 于是两种截断都能一路走到正常收尾:
         //   正文在 list 之前断掉  -> 找不到 list -> NotFound -> 按空页处理 -> 本池正常结束
         //   list 完整但 hasMore 之后断掉 -> 数组 Ok, hasMore 读不到 -> 当 false -> 本池正常结束
-        // 两者在 midPool 时都会留下永久缺口。括号/引号配对对"被截断"这一类是可靠判据。
+        // 两者在已吃进新记录时都会留下永久缺口。括号/引号配对对"被截断"这一类是可靠判据。
         // (注意: 这组 helper 是局部扫描器而非完整 JSON 校验器 —— 见 JsonScan.h 的能力边界。
         //  真正需要逐字回写的片段另走 efjson::IsStrictJsonValue。)
+        //
+        // 信封的解析整段在 InspectPageEnvelope 里 (同一份实现也被 Tests/ 直接调用)。
         // ==========================================================
-        if (!efjson::IsCompleteObjectDocument(rv))
+        const PageEnvelope env = InspectPageEnvelope(rv);
+        if (!env.complete)
             return problem("接口返回的正文不是一个完整的 JSON 对象 (多半是传输被截断)");
+        if (!env.codeFound) return problem("响应非预期 JSON 结构 (无 code 字段)");
+        if (env.code != "0")
+            return problem(std::string("接口业务错误: ").append(env.msg));
 
-        // ---- code / msg: 结构化优先, 读不到再回退全文 ----
-        // 全文找键会被 list 元素里的同名字段盖住 (JSON 成员顺序本不该有语义), 也会被
-        // "某个字符串值恰好等于键名"命中。顶层字段按本层读就没有这两个问题;
-        // 回退分支保留是为了接口将来改变嵌套层级时不至于整个拉不动。
-        std::string_view code;
-        {
-            const JsonValueRef cv = FindTopLevelValue2(rv, "code");
-            code = (cv.kind == JsonValueKind::String || cv.kind == JsonValueKind::Number)
-                 ? cv.text : ExtractJsonValue2(rv, "code", false);
-        }
-        if (code.empty()) return problem("响应非预期 JSON 结构 (无 code 字段)");
-        if (code != "0") {
-            std::string_view msg;
-            {
-                const JsonValueRef mv = FindTopLevelValue2(rv, "msg");
-                msg = (mv.kind == JsonValueKind::String) ? mv.text : ExtractJsonValue2(rv, "msg", true);
-            }
-            return problem(std::string("接口业务错误: ").append(msg));
-        }
-
-        // ---- 定位记录数组与 hasMore ----
-        // 只要 root.data (或 root 本身) 是对象, 就按本层读; 否则回退到全文找键。
-        std::string_view host;
-        bool structured = false;
-        {
-            const JsonValueRef dataV = FindTopLevelValue2(rv, "data");
-            if (dataV.kind == JsonValueKind::Object) { host = dataV.text; structured = true; }
-            else if (FindTopLevelValue2(rv, "list").kind == JsonValueKind::Array) { host = rv; structured = true; }
-        }
-        LocateResult listStatus = LocateResult::NotFound;
-        std::string_view listText;
-        bool hasMoreKnown = false, hasMoreValue = false, hasMoreBad = false;
-        if (structured) {
-            const JsonValueRef lv = FindTopLevelValue2(host, "list");
-            if (lv.kind == JsonValueKind::Array) { listStatus = LocateResult::Located; listText = lv.text; }
-            else if (lv.malformed) listStatus = LocateResult::Malformed;   // "读不出来" 不是 "没有"
-            else if (lv.kind == JsonValueKind::None || lv.kind == JsonValueKind::Null)
-                 listStatus = LocateResult::NotFound;
-            else listStatus = LocateResult::Malformed;
-
-            const JsonValueRef hm = FindTopLevelValue2(host, "hasMore");
-            if (hm.kind == JsonValueKind::Bool) { hasMoreKnown = true; hasMoreValue = (hm.text == "true"); }
-            else if (hm.kind == JsonValueKind::String && (hm.text == "true" || hm.text == "false")) {
-                hasMoreKnown = true; hasMoreValue = (hm.text == "true");
-            } else if (hm.malformed) {
-                // 这一层根本读不下去 —— FindMember 此时返回 kind==None + malformed==true,
-                // 与"没有这个键"是两回事 (JsonScan.h 的三态契约)。并进静默分支就又变成
-                // "读不出来当没有", 所以单独按异常处理。
-                hasMoreBad = true;
-            } else if (hm.kind != JsonValueKind::None && hm.kind != JsonValueKind::Null) {
-                hasMoreBad = true;   // 键在, 但既不是布尔也不是布尔字面量字符串
-            }
-        } else {
-            const auto loc = efjson::LocateArrayFullText(rv, "list");
-            listStatus = loc.first;
-            listText   = loc.second;
-        }
-        // 结构路径没拿到记录数组时回退全文 —— 与 hasMore 同款。
-        // 现网的形状是 {code,msg,data:{list,hasMore}}, 也就是 structured 恒为 true; 如果接口
-        // 哪天把 list 再往里挪一层 (data.page.list), 只认 data 本层就会读到"这一页没有记录",
-        // 第 1 页因此按空池收尾并打印"完成, 新增 0 条" —— 六个池全这样就是静默 0 条照常写盘。
-        // 提交里承诺的"嵌套层级变化时回退全文"必须对现网形状也成立, 否则等于没有。
-        if (listStatus == LocateResult::NotFound) {
-            const auto loc = efjson::LocateArrayFullText(rv, "list");
-            if (loc.first != LocateResult::NotFound) { listStatus = loc.first; listText = loc.second; }
-        }
-        // 结构路径在 host 这一层没找到 hasMore 时, 回退到全文查找 —— 把查找范围钉死在
-        // root.data 收窄了兼容面 (接口完全可能把 list 放 data 里而 hasMore 留在 root),
-        // 而"读不到 hasMore"会被下面的闸门判成异常, 所以这里必须先把旧的宽松路径兜回来。
-        if (!hasMoreKnown && !hasMoreBad) {
-            const std::string_view hm = ExtractJsonValue2(rv, "hasMore", false);
-            if (hm == "true" || hm == "false") { hasMoreKnown = true; hasMoreValue = (hm == "true"); }
-        }
+        const LocateResult listStatus   = env.listStatus;
+        const std::string_view listText = env.listText;
+        const bool hasMoreKnown = env.hasMoreKnown;
+        const bool hasMoreValue = env.hasMoreValue;
+        const bool hasMoreBad   = env.hasMoreBad;
 
         // ---- 解析 list ----
         long long lastSeq = 0;

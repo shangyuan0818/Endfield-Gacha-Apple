@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "data": {
+    "list": [
+      {
+        "seqId": "101",
+        "gachaTs": "1",
+        "kind": "gift_intel_book",
+        "extra": {
+          "hasMore": false
+        }
+      }
+    ]
+  },
+  "hasMore": true
+}

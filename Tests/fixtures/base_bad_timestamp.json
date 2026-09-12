@@ -1,0 +1,18 @@
+{
+  "endfield": [
+    {
+      "uid": "A",
+      "list": [
+        {
+          "id": "101",
+          "gacha_ts": true,
+          "item_id": "test",
+          "item_name": "UP",
+          "rank_type": "6",
+          "item_type": "Character",
+          "gacha_type": "special_test"
+        }
+      ]
+    }
+  ]
+}

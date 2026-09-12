@@ -342,8 +342,18 @@ template<typename Cb>
 
 namespace detail {
 
+// JSON 只把这四个字符算作空白 (RFC 8259 §2)。
+//
+// 上面那些【宽松扫描器】用的是 `c <= ' '`, 对付服务器报文足够, 也刻意容忍一些脏字节;
+// 但严格校验器的职责是"批准这段字节原样写进存档", 一旦放行了标准解析器会拒绝的东西
+// (例如字符串之外的裸 NUL), 写出去的存档 NSJSONSerialization 与所有第三方 UIGF 工具
+// 都解析不了, 而本工具自己的扫描器还能一轮轮读回来 —— 永远发现不了。
+inline bool IsJsonWhitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 inline bool SkipWs(std::string_view s, size_t& i) {
-    while (i < s.size() && (unsigned char)s[i] <= ' ') ++i;
+    while (i < s.size() && IsJsonWhitespace(s[i])) ++i;
     return i < s.size();
 }
 
@@ -463,7 +473,7 @@ inline bool StrictValue(std::string_view s, size_t& i, int depth) {
 inline bool IsStrictJsonValue(std::string_view s) {
     size_t i = 0;
     if (!detail::StrictValue(s, i, 0)) return false;
-    while (i < s.size() && (unsigned char)s[i] <= ' ') ++i;
+    while (i < s.size() && detail::IsJsonWhitespace(s[i])) ++i;
     return i == s.size();
 }
 
