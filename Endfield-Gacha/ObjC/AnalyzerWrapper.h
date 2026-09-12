@@ -29,6 +29,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL ksIsNormal;
 @property (nonatomic) double ksDUp;
 @property (nonatomic) BOOL ksIsNormalUp;
+// v0.1.4.0: UP 侧样本是否为"两种分布的混合"。重构寻访的理论 UP 曲线描述的是
+// 【系列内第一个 UP】(带 120 抽兜底), 而经验 freq_up 记的是每两个 UP 之间的间隔 ——
+// 一旦样本里出现第 2 个 UP, 两者就不是同一个统计对象, 不再作"符合/偏离"判定。
+@property (nonatomic) BOOL ksUpMixed;
 @property (nonatomic) NSInteger censoredPityAll;
 @property (nonatomic) NSInteger censoredPityUp;
 
@@ -55,6 +59,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) GachaChartData* statsWep;
 // v0.1.2.0: 辉光庆典池数据
 @property (nonatomic, strong, nullable) GachaChartData* statsJoint;
+// v0.1.4.0: 重构寻访 (RE-Factor Headhunting) 池数据
+@property (nonatomic, strong, nullable) GachaChartData* statsRefactor;
 @property (nonatomic) BOOL ok;
 @end
 

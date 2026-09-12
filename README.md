@@ -23,6 +23,15 @@ Gacha tracker and visualizer for Arknights: Endfield on macOS &amp; iOS. Built w
    
    拖拽UIGF文件到窗口。
 
+> [!IMPORTANT]
+> The in-game headhunting record only covers **the last 90 days**. Records older than that are dropped
+> by the official API and can never be fetched again. Each fetch merges incrementally into the UIGF file
+> you supply as the baseline, so fetch regularly and keep that file — it is the only long-term archive
+> of your pulls.
+>
+> 游戏内【寻访记录】只支持查询**最近 90 天**的记录，更早的记录会被官方接口丢弃且无法再取回。
+> 每次拉取都是增量合并到你选定的基底 UIGF 文件，所以请定期拉取并保留该文件 —— 它是你抽卡历史的唯一长期存档。
+
 
 
 ## Compatibility / 兼容性

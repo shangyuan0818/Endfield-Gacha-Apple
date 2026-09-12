@@ -53,9 +53,10 @@ private extension Color {
 
 // MARK: - 布局枚举
 enum ChartGridLayout {
-    case grid2x2          // macOS:2x2 自适应填满父容器
-    case grid2x2Fixed     // iPad:2x2 但每行固定 360pt(ScrollView 容器需要)
-    case vertical         // iPhone:纵向堆叠,每张 280pt
+    // 名字沿用历史 (最初是 2x2); v0.1.4.0 起实际是 2 列 × 4 行 (特许/辉光/重构/武器)。
+    case grid2x2          // macOS:2 列自适应填满父容器
+    case grid2x2Fixed     // iPad:2 列但每行固定高度(ScrollView 容器需要)
+    case vertical         // iPhone:纵向堆叠
 }
 
 // MARK: - 理论 CDF (与 Windows / Analyzer InitCDFTables 完全对齐)
@@ -63,6 +64,12 @@ enum ChartGridLayout {
 // charPool / wepPool: 综合 6★ 的 CDF (任意 6★)
 // charPoolUP / wepPoolUP: 当期 UP 的 CDF (考虑歪率 + 各自硬保底)
 private struct TheoryCDF {
+    // 角色寻访的基础六星概率 (客户端 GachaCharPoolTypeTable: star6BaseRate = 8000 → 0.8%)。
+    // 赠送十连(加急招募)恒按【基础概率】判定, 不吃 66 抽起的软保底加成 —— 官方原文
+    // 「加急招募的干员获取概率与本次寻访的基础概率一致」, 且其结果不计入保底计数。
+    // 与 AnalyzerWrapper.mm 的 kBaseRate6 同源, 两边必须一起改。
+    static let baseRate6 = 0.008
+
     // ===== 角色综合 6★ =====
     static let charPool: [Double] = {
         var cdf = [Double](repeating: 0, count: 82)
@@ -153,7 +160,11 @@ private struct TheoryCDF {
                 for _ in 0..<10 {
                     var stateB = [Double](repeating: 0, count: maxSoftPity)
                     for s in 0..<maxSoftPity where stateA[s] > 0 {
-                        let ph = h(s + 1)
+                        // 赠送十连走【基础概率】, 不吃软保底加成。本池只有 n=30 一个赠送
+                        // 节点, 此时水位 s <= 30 < 66, h() 本来就等于基础概率, 故数值不变;
+                        // 改写成 baseRate6 是为了与重构寻访 (赠送节点到 n=90, 存活水位可
+                        // 进入 66..79 的软保底段) 用同一套口径。
+                        let ph = baseRate6
                         stateB[s] += stateA[s] * (1 - ph)   // 不出货, 水位停
                         pFinish   += stateA[s] * ph * 0.5   // 毕业 (出 UP)
                         stateB[s] += stateA[s] * ph * 0.5   // 歪, 水位停 (免费抽)
@@ -176,6 +187,109 @@ private struct TheoryCDF {
                 cdf[n] = min(1.0, cum)
                 D = newD
             }
+        }
+        return cdf
+    }()
+
+    // ===== 重构寻访 综合 6★ (v0.1.4.0) =====
+    // 「重构寻访」(RE-Factor Headhunting) 是 1.5「雪凇幽梦」新增的第五种角色寻访类型。
+    // 数值与特许寻访逐字段相同 (0.8% 基础 / 66 抽起 +5% 软保底 / 80 抽硬保底 / 120 抽 UP
+    // 硬保底), 唯一差异是赠送十连从 1 次 (累计 30 抽) 变成 3 次 (累计 30/60/90 抽)。
+    // 本表与 charPool 的唯一差别: 赠送十连的合并 hazard 节点从「只有 30」变成「30 和 60」。
+    // 为什么没有 90: 本表按【距上次六星的抽数 x】索引, 80 抽硬保底保证 x <= 80, 所以
+    //   累计第 90 抽的那次赠送十连在本表坐标系里不可达 (它只能发生在某次六星之后, 水位
+    //   已归零)。经验侧第 3 块并入节点 60, 与 AnalyzerWrapper.mm 的 free_node_all 一致。
+    // E[首六星] ≈ 51.37 (特许 51.81)。官方规则: https://endfield.hypergryph.com/news/4776
+    static let refactorPool: [Double] = {
+        var cdf = [Double](repeating: 0, count: 82)
+        var surv = 1.0
+        for i in 1...80 {
+            let p: Double
+            if i == 30 || i == 60 { p = 1.0 - pow(1.0 - baseRate6, 11) }  // 本体 1 抽 + 免费十连 10 抽
+            else if i <= 65       { p = 0.008 }
+            else if i <= 79       { p = 0.058 + Double(i - 66) * 0.05 }
+            else                  { p = 1.0 }
+            let pp = min(p, 1.0)
+            cdf[i] = cdf[i-1] + surv * pp
+            surv *= (1.0 - pp)
+        }
+        cdf[81] = 1.0
+        return cdf
+    }()
+
+    // ===== 重构寻访 当期 UP (v0.1.4.0) =====
+    // 与 charPoolUP 同构 (单维水位状态 + 每次出货独立 50/50 + n=120 硬保底强制毕业),
+    // 唯一差别: 赠送十连展开点从 {30} 变成 {30, 60, 90}。本表按【累计抽数 n】索引,
+    // 三个里程碑都能精确表达。E[首 UP] ≈ 77.83 (特许 79.29)。
+    //
+    // 【重要假设 — 官方未公布】P(UP | 出六星) = 50%, 沿用特许寻访, 依据是两池其余参数
+    //   逐字段相同。待开池后用游戏内概率公示页核对。
+    // 【作用域】官方原文: 80 抽小保底「所有『重构寻访』共享…继承到其他『重构寻访』」;
+    //   120 抽 UP 保底「在同名重构寻访中仅生效 1 次, 计数继承到后续同名重构寻访」。
+    //   故本表描述的是【系列内第一个 UP】的分布; 样本里一旦出现第 2 个 UP 就成了混合
+    //   分布, 由 ChartData.ks_up_mixed 标记, 文本侧不再作"符合/偏离"判定。
+    static let refactorPoolUP: [Double] = {
+        let hardCap = 120
+        let maxSoftPity = 80
+        var cdf = [Double](repeating: 0, count: hardCap + 2)
+
+        func h(_ k: Int) -> Double {
+            if k <= 65       { return 0.008 }
+            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
+            else             { return 1.0 }
+        }
+
+        var D = [Double](repeating: 0, count: maxSoftPity)
+        D[0] = 1.0
+        var cum = 0.0
+
+        for n in 1...hardCap {
+            if n == hardCap {
+                let alive = D.reduce(0, +)
+                cum += alive
+                cdf[n] = min(1.0, cum)
+                for k in (n + 1)...(hardCap + 1) { cdf[k] = 1.0 }
+                break
+            }
+
+            var newD = [Double](repeating: 0, count: maxSoftPity)
+            var pHitGrad = 0.0
+
+            if n == 30 || n == 60 || n == 90 {
+                // 赠送十连里程碑: 11 次独立判定 (本体抽 1 次 + 免费十连 10 次)
+                var stateA = [Double](repeating: 0, count: maxSoftPity)
+                for s in 0..<maxSoftPity where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoftPity { stateA[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad  += D[s] * ph * 0.5   // 毕业 (出 UP)
+                    stateA[0] += D[s] * ph * 0.5   // 歪, 水位归 0 (本体抽)
+                }
+                for _ in 0..<10 {
+                    var newStateA = [Double](repeating: 0, count: maxSoftPity)
+                    for s in 0..<maxSoftPity where stateA[s] > 0 {
+                        // 赠送十连走【基础概率】: 第 3 个节点在 n=90, 存活水位可以到
+                        // 66..79 的软保底段 —— 若沿用 h(), 免费单抽会被算成最高 30.8%
+                        // 的出货率 (基础是 0.8%)。
+                        let ph = baseRate6
+                        newStateA[s] += stateA[s] * (1 - ph)   // 不出货, 水位停
+                        pHitGrad     += stateA[s] * ph * 0.5   // 毕业 (出 UP)
+                        newStateA[s] += stateA[s] * ph * 0.5   // 歪, 水位停 (免费抽)
+                    }
+                    stateA = newStateA
+                }
+                newD = stateA
+            } else {
+                for s in 0..<maxSoftPity where D[s] > 0 {
+                    let ph = h(s + 1)
+                    if s + 1 < maxSoftPity { newD[s + 1] += D[s] * (1 - ph) }
+                    pHitGrad += D[s] * ph * 0.5
+                    newD[0]  += D[s] * ph * 0.5
+                }
+            }
+
+            cum += pHitGrad
+            cdf[n] = min(1.0, cum)
+            D = newD
         }
         return cdf
     }()
@@ -276,7 +390,7 @@ private struct TheoryCDF {
                 for _ in 0..<10 {
                     var newStateA = [Double](repeating: 0, count: maxSoft)
                     for s in 0..<maxSoft where stateA[s] > 0 {
-                        let ph = h(s + 1)
+                        let ph = baseRate6   // 赠送十连走基础概率, 不吃软保底加成
                         newStateA[s] += stateA[s] * (1 - ph)
                         pHitGrad     += stateA[s] * ph * 0.5
                         newStateA[s] += stateA[s] * ph * 0.5
@@ -336,7 +450,7 @@ private struct TheoryCDF {
                 for _ in 0..<10 {
                     var newStateA = [Double](repeating: 0, count: maxSoft)
                     for s in 0..<maxSoft where stateA[s] > 0 {
-                        let ph = h(s + 1)
+                        let ph = baseRate6   // 赠送十连走基础概率, 不吃软保底加成
                         newStateA[s] += stateA[s] * (1 - ph)
                         pHitGrad     += stateA[s] * ph * 0.5
                         newStateA[s] += stateA[s] * ph * 0.5
@@ -366,9 +480,10 @@ private struct TheoryCDF {
 }
 
 struct ChartGridView: View {
-    let statsChar:  ChartData
-    let statsJoint: ChartData   // v0.1.2.0: 辉光庆典池
-    let statsWep:   ChartData
+    let statsChar:     ChartData
+    let statsJoint:    ChartData   // v0.1.2.0: 辉光庆典池
+    let statsRefactor: ChartData   // v0.1.4.0: 重构寻访池
+    let statsWep:      ChartData
     var layout: ChartGridLayout = .grid2x2
 
     var body: some View {
@@ -382,7 +497,7 @@ struct ChartGridView: View {
         }
     }
 
-    // macOS / iPad: 2x3 网格 (3 行 × 2 列, 每行一个池子: 特许/辉光/武器)
+    // macOS / iPad: 2x4 网格 (4 行 × 2 列, 每行一个池子: 特许/辉光/重构/武器)
     //
     // 高度策略:
     //   - macOS: 外层 ZStack 撑满窗口,内容自适应。
@@ -400,6 +515,11 @@ struct ChartGridView: View {
             }
             .frame(height: useFixedHeight ? 280 : nil)
             HStack(spacing: 12) {
+                refactorECDF
+                refactorMRL
+            }
+            .frame(height: useFixedHeight ? 280 : nil)
+            HStack(spacing: 12) {
                 wepECDF
                 wepMRL
             }
@@ -407,19 +527,21 @@ struct ChartGridView: View {
         }
     }
 
-    // iPhone: 纵向 6 张依次堆叠 (3 个池 × 2 图), 每张固定高度
+    // iPhone: 纵向 8 张依次堆叠 (4 个池 × 2 图), 每张固定高度
     private var verticalLayout: some View {
         VStack(spacing: 12) {
             charECDF.frame(height: 260)
             charMRL.frame(height: 260)
             jointECDF.frame(height: 260)
             jointMRL.frame(height: 260)
+            refactorECDF.frame(height: 260)
+            refactorMRL.frame(height: 260)
             wepECDF.frame(height: 260)
             wepMRL.frame(height: 260)
         }
     }
 
-    // MARK: 6 张图的具体配置(只写一次,两种布局共用)
+    // MARK: 8 张图的具体配置(只写一次,两种布局共用)
     private var charECDF: some View {
         ECDFCanvas(title: "角色 (特许寻访) 累积分布 (ECDF)",
                    freq_all: statsChar.freq_all, freq_up: statsChar.freq_up,
@@ -466,6 +588,31 @@ struct ChartGridView: View {
                   limitBase: 240,
                   theoryAllCap: 80, theoryUpCap: 240,
                   tailMeanExcessUp: TheoryCDF.jointTailMeanExcess)
+    }
+    // v0.1.4.0: 重构寻访图表。池中六星只有 6 个 = 当期 UP + 5 名常驻 (不含往期滞留的
+    // 限定角), 所以"非常驻 = UP"这条判定在本池是严格成立的 —— 比特许池 (8 个六星, 含
+    // 前两期限定) 还干净。X 轴与特许池一致取 120 (UP 硬保底), MRL 理论上限同为 80 / 120。
+    private var refactorECDF: some View {
+        ECDFCanvas(title: "角色 (重构寻访) 累积分布 (ECDF)",
+                   freq_all: statsRefactor.freq_all, freq_up: statsRefactor.freq_up,
+                   count_all: statsRefactor.count_all, count_up: statsRefactor.count_up,
+                   censored_all: statsRefactor.censored_pity_all,
+                   censored_up:  statsRefactor.censored_pity_up,
+                   theoryCDF: TheoryCDF.refactorPool,
+                   theoryCDFUp: TheoryCDF.refactorPoolUP,
+                   limitBase: 120,
+                   ecdfUpStepSize: 1)
+    }
+    private var refactorMRL: some View {
+        MRLCanvas(title: "角色 (重构寻访) 剩余抽数期望 (MRL)",
+                  freq_all: statsRefactor.freq_all, freq_up: statsRefactor.freq_up,
+                  count_all: statsRefactor.count_all, count_up: statsRefactor.count_up,
+                  censored_all: statsRefactor.censored_pity_all,
+                  censored_up:  statsRefactor.censored_pity_up,
+                  theoryCDF: TheoryCDF.refactorPool,
+                  theoryCDFUp: TheoryCDF.refactorPoolUP,
+                  limitBase: 120,
+                  theoryAllCap: 80, theoryUpCap: 120)
     }
     private var wepECDF: some View {
         ECDFCanvas(title: "武器累积分布 (ECDF)",

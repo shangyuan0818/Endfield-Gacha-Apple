@@ -42,6 +42,10 @@ struct ChartData: Sendable {
     var ks_is_normal:  Bool = true
     var ks_d_up:    Double = 0
     var ks_is_normal_up: Bool = true
+    // v0.1.4.0: UP 侧样本是否为"两种分布的混合"。只有重构寻访会出现 ——
+    // 理论曲线描述的是【系列内第一个 UP】(带 120 抽兜底), 而经验样本记的是每两个 UP
+    // 之间的间隔, 第 2 个及以后的 UP 没有兜底。两者不是同一个统计对象, 混合时不判定。
+    var ks_up_mixed: Bool = false
     var censored_pity_all: Int = 0
     var censored_pity_up:  Int = 0
 }
@@ -50,12 +54,14 @@ struct ChartData: Sendable {
 //
 // 共享类型。提到顶层后,iOS 的 AnalysisView_iOS 与 macOS 的 ContentView
 // 都可以直接用。
-// v0.1.2.0: 加 statsJoint (辉光庆典池). 老调用方在拿不到时可以为 nil 容错,
+// v0.1.2.0: 加 statsJoint (辉光庆典池).
+// v0.1.4.0: 加 statsRefactor (重构寻访池). 老调用方在拿不到时可以为 nil 容错,
 //   但新代码路径应该总是设置 (AnalyzerBridge 保证).
 struct AnalysisBundle: Sendable {
-    var statsChar:  ChartData
-    var statsJoint: ChartData
-    var statsWep:   ChartData
+    var statsChar:     ChartData
+    var statsJoint:    ChartData
+    var statsRefactor: ChartData
+    var statsWep:      ChartData
 }
 
 struct AnalysisBundleResult {
@@ -106,6 +112,7 @@ nonisolated private func toChartData(_ d: GachaChartData) -> ChartData {
     c.ks_is_normal      = d.ksIsNormal
     c.ks_d_up           = d.ksDUp
     c.ks_is_normal_up   = d.ksIsNormalUp
+    c.ks_up_mixed       = d.ksUpMixed
     c.censored_pity_all = d.censoredPityAll
     c.censored_pity_up  = d.censoredPityUp
 
@@ -127,6 +134,7 @@ enum AnalyzerBridge {
         guard result.ok,
               let sc = result.statsChar,
               let sj = result.statsJoint,
+              let sr = result.statsRefactor,
               let sw = result.statsWep else {
             let msg = result.textOutput ?? "分析失败"
             return AnalysisBundleResult(outputText: msg, charts: nil)
@@ -134,13 +142,15 @@ enum AnalyzerBridge {
 
         let chartChar  = toChartData(sc)
         let chartJoint = toChartData(sj)
+        let chartRefac = toChartData(sr)
         let chartWep   = toChartData(sw)
 
         return AnalysisBundleResult(
             outputText: result.textOutput ?? "",
-            charts: AnalysisBundle(statsChar:  chartChar,
-                                   statsJoint: chartJoint,
-                                   statsWep:   chartWep)
+            charts: AnalysisBundle(statsChar:     chartChar,
+                                   statsJoint:    chartJoint,
+                                   statsRefactor: chartRefac,
+                                   statsWep:      chartWep)
         )
     }
 }
