@@ -18,7 +18,7 @@
 #import <Foundation/Foundation.h>
 #import <TargetConditionals.h>
 
-#include "JsonScan.h"   // 与 AnalyzerWrapper.mm 共用的 JSON 扫描器 (v0.1.5.1 抽出)
+#include "JsonScan.h"   // 与 AnalyzerWrapper.mm 共用的 JSON 扫描器 (v0.1.4.2 抽出)
 
 #include <algorithm>
 #include <array>
@@ -49,7 +49,7 @@ namespace {
 // ============================================================
 //  JSON / URL 解析
 //
-//  v0.1.5.1: JSON 扫描器整段提到共享头 JsonScan.h。此前 FetchSession.mm 与
+//  v0.1.4.2: JSON 扫描器整段提到共享头 JsonScan.h。此前 FetchSession.mm 与
 //  AnalyzerWrapper.mm 各抄了一份 (上游 main.cpp / gui.cpp 也是如此), 结果两边悄悄分叉 ——
 //  导出器改成按结构路径读存档之后, 分析器还在全文找第一个 "list", 同一份合法存档只要
 //  顶层成员顺序不同就读出不同结果。现在两边引用同一份实现。
@@ -91,7 +91,7 @@ template<typename Cb>
 
 // 读一个【必须是整数】的字段: 接受 JSON 字符串与数字两种形态, 整串必须解析干净。
 //
-// v0.1.5.1: 存档里的 id / gacha_ts 此前用 ExtractJsonValue2(..., isStr=true) + 裸 from_chars 读,
+// v0.1.4.2: 存档里的 id / gacha_ts 此前用 ExtractJsonValue2(..., isStr=true) + 裸 from_chars 读,
 // 有三个静默失败: (a) 第三方 UIGF 导出器把 id 写成数字字面量 -> isStr 分支要求以 '"' 开头,
 // 直接返回空 -> 解析成 0; (b) "12ab" 被 from_chars 吃成 12; (c) 超 int64 时 from_chars 不写出参,
 // 仍是 0。id 同时是去重键, 塌成 0 之后 "触达本地老记录" 永不触发, 整段历史会被重复追加,
@@ -108,7 +108,7 @@ inline bool ReadIntegerField(std::string_view obj, std::string_view key, long lo
 
 // 读一个文本字段: 字符串取引号之间的原文 (转义不还原), 数字/布尔取字面量, 缺失/null 取空。
 //
-// v0.1.5.1: 存档字段此前一律用 ExtractJsonValue2(..., isStr=true) 读, 而它在"值不是以 \" 开头"
+// v0.1.4.2: 存档字段此前一律用 ExtractJsonValue2(..., isStr=true) 读, 而它在"值不是以 \" 开头"
 // 时返回空视图。UIGF 的 endfield 段没有官方 schema, 第三方转换器把 rank_type 写成 JSON 数字
 // ("rank_type": 6) 很常见 —— 旧写法把它读成空, 再以 "rank_type": "" 原样回写, 覆盖用户唯一的
 // 长期存档, 稀有度就此永久消失; 分析端随后把这条当成"没出六星的一抽", 其后每个六星的保底
@@ -371,7 +371,7 @@ struct BufferedWriter{
         struct tm tmv{};
         char b[64];
         int n = 0;
-        // v0.1.5.1: 必须检查返回值。时间戳来自外部文件, 被构造/损坏的值 (例如
+        // v0.1.4.2: 必须检查返回值。时间戳来自外部文件, 被构造/损坏的值 (例如
         //   "gacha_ts":"-9223372036854775808") 能被 ParseFullInt64 正常解析, 但 localtime_r
         //   对无法表示的时间返回 NULL 且【不写出参】—— 旧写法随后直接读未初始化的 struct tm,
         //   轻则把随机日期写进存档, 重则 UB。
@@ -424,7 +424,7 @@ struct PoolCfg{
     std::string poolType;
     std::string displayName;
     bool isWeapon;
-    // v0.1.5.1: 这个池型可能【在某些区服/服务端版本上还不存在】。
+    // v0.1.4.2: 这个池型可能【在某些区服/服务端版本上还不存在】。
     //   服务端对未知 pool_type 返回 {"code":40000,"msg":"Invalid pool_type"}, 而协调器
     //   把任何池级错误都升级为"整次拉取失败、不写盘"(见 GachaFetchCoordinator 的注释:
     //   宁可整次作废也不留半份数据)。对一个尚未上线的池型来说, 那意味着拉取功能对
@@ -479,7 +479,7 @@ struct FetchSessionImpl {
     //   但单独存放、单独写盘, 不进 UIGF 的 "list"。
     std::optional<std::pmr::vector<NonPullEvent>> events;
     size_t migratedLegacy = 0;   // 从旧版 list 里迁出的非抽卡事件条数 (仅用于提示)
-    // v0.1.5.1: newCount 此前直接取 sessionIds.size() (抽卡 + 事件), 而 totalCount 只数
+    // v0.1.4.2: newCount 此前直接取 sessionIds.size() (抽卡 + 事件), 而 totalCount 只数
     //   records (抽卡), 于是"本次新增 3 条, 文件内共计 101 条"里的两个数字口径不同, 用户
     //   会以为丢了记录。改成分别计数, UI 分开显示。
     int newPulls = 0;            // 本次会话新增的抽卡记录条数
@@ -688,7 +688,7 @@ inline NSString* NSStr(std::string_view sv){
             bool   eventsCorrupt  = false;
             bool   eventsBadShape = false;   // 键在, 但值不是一个正常闭合、元素全为对象的数组
             size_t eventsMalformed = 0;
-            // v0.1.5.1: 抽卡记录区的 id 解析失败同样是"读不出来", 必须与事件区一个口径 ——
+            // v0.1.4.2: 抽卡记录区的 id 解析失败同样是"读不出来", 必须与事件区一个口径 ——
             //   id 是去重键, 静默塌成 0 会让"触达本地老记录"永不触发 (整段历史被重复追加),
             //   还会把原 id 以 "0" 回写覆盖。
             size_t recordsMalformed = 0;    // id / gacha_ts 读不出来的条数
@@ -734,7 +734,7 @@ inline NSString* NSStr(std::string_view sv){
                         endfieldEntries = loc.endfieldEntries;
                         if(loc.listStatus == LocateResult::Located){
                         pullScan = ForEachObjectInArray2(loc.listText, [&](std::string_view item){
-                            // v0.1.5.1: 每条记录先过一次【完整语法校验】。ForEachObjectInArray2
+                            // v0.1.4.2: 每条记录先过一次【完整语法校验】。ForEachObjectInArray2
                             //   只保证元素的括号配对, 元素内部的成员层没有校验; 而下面所有字段
                             //   读取都假设这条记录是完整可读的。一条 {"id":"1","item_id":} 这样
                             //   括号配对正确、成员层却断掉的记录, 各个 FindMember 会在坏成员处
@@ -767,7 +767,7 @@ inline NSString* NSStr(std::string_view sv){
                             // 旧版根本没读过 kind / nameText, 凭空写上就是伪造。因此迁移来的
                             // raw 是 UIGF 形状 (snake_case), 与新拉取的服务器原始对象
                             // (camelCase) 形状不同 —— 这一差异本身就标明了它的来历。
-                            // v0.1.5.1 判据收紧: 旧写法用 ExtractJsonValue2(..., isStr=true) 判空,
+                            // v0.1.4.2 判据收紧: 旧写法用 ExtractJsonValue2(..., isStr=true) 判空,
                             //   而它在"值不是以 \" 开头"时也返回空视图 —— 于是 {"item_id":null,
                             //   "rank_type":6} 这种【第三方 UIGF 导出器很常见的写法】会被当成旧版
                             //   畸形记录搬进 non_pull_events, 一次真实六星就此从抽卡数组里消失,
@@ -856,7 +856,7 @@ inline NSString* NSStr(std::string_view sv){
                                 // 升级为"中止, 不写盘"。
                                 const JsonValueRef rawV = FindTopLevelValue2(evtStr, "raw");
                                 if(rawV.kind != JsonValueKind::Object){ ++eventsMalformed; return; }
-                                // v0.1.5.1: raw 会被逐字节原样写回存档, 所以"是个对象"这一层括号级
+                                // v0.1.4.2: raw 会被逐字节原样写回存档, 所以"是个对象"这一层括号级
                                 //   校验不够 —— {"a":} / {"a" 1,,,"b"::2} 都能通过括号配对, 写出去
                                 //   就是一份非法 JSON 存档: 本工具自己的扫描器还能一轮轮读回来再写
                                 //   出去, 而 NSJSONSerialization 和任何第三方 UIGF 工具都解析不了。
@@ -1058,7 +1058,7 @@ inline NSString* NSStr(std::string_view sv){
         FetchSessionImpl& m = *_impl;
         const PoolCfg& pc = m.pools[m.poolIdx];
 
-        // ---- 异常的统一处置 (v0.1.5.1) ----
+        // ---- 异常的统一处置 (v0.1.4.2) ----
         //   m.cnt > 0: 本池已经吃进了新记录 (可能就是本页前半段吃进的)。此时无论什么原因停下,
         //     写出的文件都会是
         //     "上面有新记录、中间缺一段、下面是老记录" —— 下次增量拉取在最新记录处即触达老记录
@@ -1106,7 +1106,7 @@ inline NSString* NSStr(std::string_view sv){
             rv.remove_prefix(3);
 
         // ==========================================================
-        // 闸门 1 (v0.1.5.1): 整段正文必须是一个【完整闭合】的 JSON 对象, 后面只剩空白。
+        // 闸门 1 (v0.1.4.2): 整段正文必须是一个【完整闭合】的 JSON 对象, 后面只剩空白。
         //
         // 这一条是修复"半截正文被当成正常结束"的关键。此前只校验"找到的 list 数组是否异常",
         // 于是两种截断都能一路走到正常收尾:
@@ -1143,7 +1143,7 @@ inline NSString* NSStr(std::string_view sv){
         pageScan = ForEachObjectInArray2(listText, [&](std::string_view item){
             if(m.reached) return;
             ++itemsSeen;
-            // seqId 是【唯一】的去重键兼翻页游标。v0.1.5.1 前用 isStr=true 读 + 裸 from_chars:
+            // seqId 是【唯一】的去重键兼翻页游标。v0.1.4.2 前用 isStr=true 读 + 裸 from_chars:
             //   数字形态的 seqId 被判空、"12ab" 被吃成 12、解析失败一律静默变 0。
             //   而一旦本地历史里也存在一个 id 0 (基底 id 读不出来时就会), contains(0) 立刻
             //   命中 → 假"触达本地老记录" → 本池就地判完成, 更早的记录再也不拉, 日志却完全正常。
@@ -1182,7 +1182,7 @@ inline NSString* NSStr(std::string_view sv){
             }
 
             // ---- 抽卡 / 非抽卡事件 的分流 ----
-            // v0.1.5.1 修正判据方向: 旧写法是 "kind 缺失或 == draw" AND "itemId 与 rarity 都在",
+            // v0.1.4.2 修正判据方向: 旧写法是 "kind 缺失或 == draw" AND "itemId 与 rarity 都在",
             //   三个条件是 AND, 于是注释里号称的"保险"根本兜不住 —— 官方哪天把 kind 从 "draw"
             //   改成别的字符串, 【所有真实抽卡】都会被整体判成事件, 抽卡数组直接清空。
             //   现在由物理判据拿最终决定权: 有物品 id 且有稀有度 ⇒ 是一次抽卡; 两者缺一 ⇒ 事件。
@@ -1258,7 +1258,7 @@ inline NSString* NSStr(std::string_view sv){
             return o;
         }
 
-        // ---- 结构异常的四道闸门 (v0.1.5.1) ----
+        // ---- 结构异常的四道闸门 (v0.1.4.2) ----
         // 顺序要紧: 扫描一遇到非法元素就立刻返回, 后面的对象不会再回调, 所以 m.reached 为真
         // 必然发生在出错点【之前】—— 边界已经找到, 这一页尾巴坏不坏都不影响完整性, 走正常收尾。
         // seqAnomaly 放在 m.reached 判定【之外】: 回调开头就有 if(m.reached) return;, 所以任何
@@ -1295,7 +1295,7 @@ inline NSString* NSStr(std::string_view sv){
         if (m.reached || !m.hasMore || itemsSeen == 0) {
             poolDone = true;
         } else {
-            // v0.1.5.1: 游标必须【严格前进】。服务端按 seqId 倒序返回, 下一页的游标 = 本页最后
+            // v0.1.4.2: 游标必须【严格前进】。服务端按 seqId 倒序返回, 下一页的游标 = 本页最后
             //   一条 (最小的那个 seqId)。若它没变或反而变大, 下一次请求就是同一个 URL → 同一份
             //   响应 → 以 300ms 间隔无限重复。旧代码毫无保护: lastSeq 为 0 时连 &seq_id= 都不会
             //   追加, 直接反复请求第 1 页, UI 永远停在"正在抓取"。
@@ -1487,7 +1487,7 @@ inline NSString* NSStr(std::string_view sv){
             // 每个元素是 { "id", "gacha_ts", "raw" }: 前两个是本工具自用的检索字段
             // (写在前面, 保证全文找键的首个匹配一定命中它们), raw 是服务器原始对象,
             // 原样透传 —— 将来出现新的 kind 也不会因为字段没被识别而丢失。
-            // 位置: endfield 写在前面。v0.1.5.1 起分析端 (AnalyzerWrapper) 也改走
+            // 位置: endfield 写在前面。v0.1.4.2 起分析端 (AnalyzerWrapper) 也改走
             // 根.endfield[0].list 的结构路径了, 因此两端都不再依赖这个顺序 —— 保持 endfield
             // 在前只是为了对那些"全文找首个 list"的第三方工具友好。
             auto& events = *m.events;
@@ -1525,7 +1525,7 @@ inline NSString* NSStr(std::string_view sv){
             return s;
         }
 
-        // ---- 落盘持久化 (v0.1.5.1) ----
+        // ---- 落盘持久化 (v0.1.4.2) ----
         // write(2) 返回成功只说明字节进了页缓存。协调器随后会用 replaceItemAt 把这个临时文件
         // 换成用户的存档 —— 换的是目录项, 新 inode 的数据块未必已经落盘。若此时掉电/强杀,
         // 用户拿到的可能是 0 字节或半截文件, 而按本文件自己的说法这份文件是唯一副本

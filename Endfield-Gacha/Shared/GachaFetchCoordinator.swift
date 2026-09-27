@@ -34,7 +34,7 @@ struct ExportOutcome:  Sendable {
     let errorMessage: String?
 }
 enum   NextRequest:    Sendable { case ready(urlString: String, logs: [String]); case done(logs: [String]); case fatal(String) }
-// v0.1.5.1: 新增 .poolSkipped —— optional 池型 (目前是重构寻访) 在第一页失败且本池尚无
+// v0.1.4.2: 新增 .poolSkipped —— optional 池型 (目前是重构寻访) 在第一页失败且本池尚无
 //   任何记录时, 只跳过该池、继续其余池。没有这一档的话, 服务端一旦不认识新池型的
 //   pool_type 枚举, 整个拉取功能对该区服就是确定性不可用的 (重试多少次都一样)。
 enum   PageStatus:     Sendable { case continueFetching; case poolSkipped; case poolError(String?); case fatal(String) }
@@ -55,7 +55,7 @@ struct FetchResult: Sendable {
 extension FetchResult {
     /// 拉取结束时给用户看的摘要 (两个 View 共用同一套文案, 避免口径分叉)。
     ///
-    /// v0.1.5.1: 抽卡与非抽卡事件分开报 —— 此前 newCount 含事件而 totalCount 只数抽卡,
+    /// v0.1.4.2: 抽卡与非抽卡事件分开报 —— 此前 newCount 含事件而 totalCount 只数抽卡,
     /// 于是"本次新增 3 条, 共计 101 条"里两个数字不是一回事, 用户会以为丢了记录。
     /// 旧版记录迁移与被跳过的卡池也必须在这里点名: 这两件事都会让"共计"与上一次对不上,
     /// 不解释的话同样像是数据丢了。

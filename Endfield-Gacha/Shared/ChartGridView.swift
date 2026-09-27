@@ -1115,7 +1115,7 @@ struct MRLCanvas: View {
         for i in 1..<260 {
             if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
         }
-        // v0.1.5.1: 删失观测 (当前垫刀) 也要计入量程, 否则它一旦超出 maxX, 下面画竖线的
+        // v0.1.4.2: 删失观测 (当前垫刀) 也要计入量程, 否则它一旦超出 maxX, 下面画竖线的
         //   resolveAndDrawLine 会直接放弃 —— 红色虚线与"已垫 N 抽 · 预期还需 X"标注整块消失,
         //   而同一屏的文字统计 / iOS 详情卡仍在显示这个 N, 两处自相矛盾。
         //   重构寻访把触发门槛从 251 降到 131: 该系列的 120 抽 UP 兜底一旦用掉, up_pity 就
@@ -1282,7 +1282,7 @@ struct MRLCanvas: View {
             if yVal <= 0 && censored < empMRL.count && empMRL[censored] > 0 {
                 yVal = empMRL[censored]
             }
-            // v0.1.5.1: 取不到 y 值时【不再整块放弃】。
+            // v0.1.4.2: 取不到 y 值时【不再整块放弃】。
             //   censored 超过 theoryCap 时理论分支被挡掉, 而经验 MRL 在没有观测的 x 上是 0,
             //   于是竖线与标注一起消失, 可同一屏的文字统计和 iOS 详情卡还在显示这个"已垫 N 抽" ——
             //   两处自相矛盾。重构寻访把这个门槛从 251 降到了 131 (系列的 120 兜底一旦用掉,

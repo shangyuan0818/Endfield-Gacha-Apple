@@ -10,7 +10,7 @@
 
 #import "AnalyzerWrapper.h"
 
-#include "JsonScan.h"   // 与 FetchSession.mm 共用的 JSON 扫描器 (v0.1.5.1 抽出)
+#include "JsonScan.h"   // 与 FetchSession.mm 共用的 JSON 扫描器 (v0.1.4.2 抽出)
 
 #include <pthread.h>
 
@@ -133,7 +133,7 @@ inline GachaType ParseGachaType(std::string_view sv) {
 
 // ------ JSON 解析 ------
 //
-// v0.1.5.1: 扫描器整段提到共享头 JsonScan.h, 与 FetchSession.mm 用同一份实现。
+// v0.1.4.2: 扫描器整段提到共享头 JsonScan.h, 与 FetchSession.mm 用同一份实现。
 //   此前两边各抄一份 (上游 gui.cpp / main.cpp 也是如此), 于是导出器改成按结构路径读存档之后,
 //   分析器还停在"全文找第一个 list"上 —— 同一份合法存档只要顶层成员顺序变成
 //   non_pull_events 在前, 分析器就会读到事件 raw 里那个空的 "list": [] 而报"无数据"。
@@ -277,7 +277,7 @@ struct StatsAccumulator {
     long long sum_all=0, sum_sq_all=0, sum_up=0, sum_sq_up=0, sum_win=0;
     int count_all=0, count_up=0, count_win=0, max_pity_all=0, max_pity_up=0;
     int win_5050=0, lose_5050=0, censored_pity_all=0, censored_pity_up=0;
-    // v0.1.5.1: UP 侧的右删失观测【可能不止一条】。重构寻访按系列独立计数, 每个还没出 UP
+    // v0.1.4.2: UP 侧的右删失观测【可能不止一条】。重构寻访按系列独立计数, 每个还没出 UP
     //   的系列都是一条"活到 x 抽仍未出 UP"的删失观测; 只取最后活动的那个会把其余系列整条
     //   丢出 Kaplan-Meier 的风险集, 使 hazard 在大 x 处被高估、MRL 给出的"还要多少抽"偏乐观。
     //   censored_pity_up 保留为【界面显示】用的那一个 (玩家正在抽的那期), 风险集用下面两项。
@@ -874,7 +874,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     int cur_pity=0, pity_up=0;            // 函数级单份状态 (特许 / 辉光用; 见下方 keyedUp/keyedAll)
     // 保底作用域 (四池各不同 —— 联网核实 + 数据验证):
     //   - 特许池(Special): 仅 120 硬保底每期重置 (pity_up); 80 小保底【继承】(cur_pity 不重置)
-    //   - 武器池(Weapon):  40 小保底 + 80 硬保底都【按期】独立 (v0.1.5.1 起改为按 pool_name 存,
+    //   - 武器池(Weapon):  40 小保底 + 80 硬保底都【按期】独立 (v0.1.4.2 起改为按 pool_name 存,
     //                      不再靠相邻探测 —— 1.5 起重构申领与武库申领的记录会交错)
     //   - 辉光庆典(Joint): 无硬保底, 连续累加, 不按期重置
     //   - 重构寻访(Refactor): 80 小保底跨所有重构池共享继承 (全局), 120 UP 保底按【同名系列】
@@ -900,7 +900,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     //
     //   已知局限: 抽卡记录只保留最近 90 天, 历史被截断时第一块可能只剩半截 (甚至整块被切掉),
     //   会让后续块序号整体降一档。无法从记录本身分辨, 故不做补偿。
-    //   ★ v0.1.5.1 更正此前的注释: 影响【不】只是"落在哪个理论节点"。slot_up / slot_all 会
+    //   ★ v0.1.4.2 更正此前的注释: 影响【不】只是"落在哪个理论节点"。slot_up / slot_all 会
     //   直接进 sum_up / sum_all, 所以 avg / 95% CI / CV / K-S D 也会跟着偏低 —— 节点值就是
     //   被计入的抽数, 是同一个量。只有出货计数与胜负统计不受影响。
     int free_pull_count = 0;                       // 非重构池用 (恒为节点 30, 实际不参与计算)
@@ -916,7 +916,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     //   也会把已经用掉的兜底额度错误地"还"给 A。而且这【不需要两个系列同时开放】,
     //   依次经历 A 第一期 → B 第一期 → A 第二期就会发生。
     //   系列标识用 pool_name: 同名系列的 #1/#2/#3 共用一个 pool_name, 不同系列名字不同。
-    // v0.1.5.1: 这套"按 pool_name 存状态"从重构寻访推广到武器池, 原因见下。
+    // v0.1.4.2: 这套"按 pool_name 存状态"从重构寻访推广到武器池, 原因见下。
     struct BannerState {
         int  pity_all   = 0;      // 距该池上一个六星的抽数 (只有武器池用: 角色池的小保底是全局的)
         int  pity_up    = 0;      // 距该池/该系列上一个 UP 的抽数 (硬保底的计数)
@@ -931,7 +931,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     //   keyedUp  = UP 侧状态 (硬保底计数 / 额度 / 赠送十连块) 按 pool_name 各存一份
     //   keyedAll = 连综合六星水位也按 pool_name 各存一份 (只有武器池需要)
     //
-    // 武器池为什么必须按键存 (v0.1.5.1):
+    // 武器池为什么必须按键存 (v0.1.4.2):
     //   1.5 起「重构申领」(poolId rerun_wpn_*) 与常规「武库申领」【同时开放】, 而武器记录
     //   接口没有 pool_type 参数 —— 所有武器池都在同一条 /api/record/weapon 时间线里返回,
     //   桶内按 |id| 升序 = 真实时间序, 于是两池的记录是【交错】的。旧的"相邻记录 pool_name
@@ -1160,7 +1160,7 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
         // 而 freq_up 记的是每两个 UP 之间的间隔: 同一系列里第 2 个及以后的 UP 已经没有这个
         // 兜底, 分布是无截断的长尾。两者不是同一个统计对象, 混在一起就没法判"符合/偏离"。
         //
-        // v0.1.5.1: 判据从"整桶 count_up > 1"改成"【某个系列内】出现了第 2 个 UP"。
+        // v0.1.4.2: 判据从"整桶 count_up > 1"改成"【某个系列内】出现了第 2 个 UP"。
         //   旧写法把"两个不同系列各出 1 个首 UP"也误标成混合 —— 那恰恰是同分布的合法样本,
         //   本可以判定却被吞掉了结论。
         //   已知仍未覆盖的一种真混合: 某系列的 120 兜底在更早的、已被 90 天窗口截掉的记录里
@@ -1265,7 +1265,7 @@ NSString* FormatOutput(const StatsResult& sc, const StatsResult& sj,
     };
     NSString* winC = sc.avg_win>=0 ? [NSString stringWithFormat:@"%.2f 抽", sc.avg_win] : @"[无数据]";
     NSString* winR = sr.avg_win>=0 ? [NSString stringWithFormat:@"%.2f 抽", sr.avg_win] : @"[无数据]";
-    // v0.1.5.1: 重构池的"理论 ≈ 77.83"是 E[系列内第一个 UP] (前提: 120 兜底未用掉)。
+    // v0.1.4.2: 重构池的"理论 ≈ 77.83"是 E[系列内第一个 UP] (前提: 120 兜底未用掉)。
     //   样本一旦混进同系列的第 2 个 UP, 这个基准就不适用了 —— 下面的 K-S 判定已经降级成
     //   "样本混合, 不判定", 均值行的理论值也必须跟着说清楚, 否则同一段输出自相矛盾。
     NSString* refTheoryUp = sr.ks_up_mixed ? @"(理论 ≈ 77.83, 仅适用于系列内首个 UP; 本样本混合)"
@@ -1455,7 +1455,7 @@ void* analyze_worker(void* arg) {
             //   但【旧版导出的 uigf_endfield.json 里可能已经存了这类条目】, 那些记录的
             //   rank_type 是空串 → RankType::Unknown。若照单全收, 它们会被当成"一次没出
             //   六星的抽卡"而把保底水位多推 1 抽 (每 60 抽一本, 特许池尤其明显)。
-            //   v0.1.5.1 收紧判据: 旧写法只看 rank_type 解析失败, 比"幽灵记录"的本意宽得多 ——
+            //   v0.1.4.2 收紧判据: 旧写法只看 rank_type 解析失败, 比"幽灵记录"的本意宽得多 ——
             //   稀有度写成数字、稀有度不在 3..6、或仅仅缺 rank_type 的【真实记录】都会被静默
             //   丢掉, 而每丢一条, 其后所有六星的保底水位都少算 1 抽, 方向与想修的问题正好相反。
             //   现在与导出器的迁移判据同源: 【没有物品 id 且没有稀有度】才算非抽卡事件。
@@ -1482,7 +1482,7 @@ void* analyze_worker(void* arg) {
             temps.push_back({pid, it, gt, rt, name, pn, isFree});
         });
 
-        // v0.1.5.1: 扫描状态必须检查。数组被截断 / 混进非对象元素 / 元素间缺分隔逗号时,
+        // v0.1.4.2: 扫描状态必须检查。数组被截断 / 混进非对象元素 / 元素间缺分隔逗号时,
         //   已经吃进的前半段照常在 temps 里, 旧写法只判 temps.empty(), 于是"半截历史"会被
         //   当成全部历史出统计 —— 六星计数、均值、K-S、当前垫刀全部基于残缺样本, 而界面上
         //   与"本来就抽得少"完全无法区分。同一个项目的拉取侧已经为读存档加了这道闸门。

@@ -46,7 +46,7 @@ typedef NS_ENUM(NSInteger, FetchNextRequestStatus) {
 typedef NS_ENUM(NSInteger, FetchIngestStatus) {
     FetchIngestContinue,     // 继续 (同池下一页 / 换池)
     FetchIngestPoolError,    // 必需池在第一页就失败 → 协调器整次中止 (保护已有数据)
-    // v0.1.5.1: 标了 optional 的池型 (目前是重构寻访) 在【第一页、本池尚无任何记录】时失败,
+    // v0.1.4.2: 标了 optional 的池型 (目前是重构寻访) 在【第一页、本池尚无任何记录】时失败,
     //   只跳过该池并继续其余池。动机: 服务端对尚未上线的 pool_type 返回
     //   {"code":40000,"msg":"Invalid pool_type"}, 而协调器把任何池级错误都升级为整次失败 ——
     //   那会让该区服的拉取功能【确定性地】彻底不可用, 重试多少次都一样。
@@ -78,7 +78,7 @@ typedef NS_ENUM(NSInteger, FetchIngestStatus) {
 
 @interface FetchExportSummary : NSObject
 @property (nonatomic, readonly) BOOL ok;
-// v0.1.5.1: 抽卡与非抽卡事件分开计数。此前 newCount 取 sessionIds.size() (抽卡+事件) 而
+// v0.1.4.2: 抽卡与非抽卡事件分开计数。此前 newCount 取 sessionIds.size() (抽卡+事件) 而
 //   totalCount 只数抽卡记录, 于是"本次新增 3 条, 文件内共计 101 条"里两个数字口径不同,
 //   用户会以为丢了记录。
 @property (nonatomic, readonly) NSInteger newCount;          // 本次新增的抽卡记录数
