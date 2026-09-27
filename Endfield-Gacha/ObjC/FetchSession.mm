@@ -122,7 +122,7 @@ inline std::string_view ReadTextField(std::string_view obj, std::string_view key
 
 
 // ============================================================
-//  可单独测试的两段"定位"逻辑 (v0.1.5.2)
+//  可单独测试的两段"定位"逻辑 (v0.1.4.3)
 //
 //  它们原本内联在 prepare / ingestResponseData 里, 而那两处是 ObjC 方法, 在没有 Apple SDK
 //  的机器上编译不了 —— 想验证"哪些输入会被接受"就只能把逻辑抄一份到测试里, 抄的那份迟早
