@@ -435,7 +435,7 @@ struct PoolCfg{
 };
 
 // ============================================================
-// [非抽卡事件]  v0.1.5.0
+// [非抽卡事件]  v0.1.4.1
 //
 // /api/record/char 的 list 里除了真实抽卡, 还会混入"发放某个道具"的事件行。
 // 目前已确认的一种是【寻访情报书】(kind = "gift_intel_book"): 特许寻访累计 60 次本体抽
@@ -475,7 +475,7 @@ struct FetchSessionImpl {
     std::optional<std::pmr::polymorphic_allocator<std::byte>> alloc;
     std::deque<std::string> payloads;
     std::optional<std::pmr::vector<ExportRecord>> records;
-    // v0.1.5.0: 非抽卡事件 (见 NonPullEvent)。与抽卡记录共用 localIds/sessionIds 去重,
+    // v0.1.4.1: 非抽卡事件 (见 NonPullEvent)。与抽卡记录共用 localIds/sessionIds 去重,
     //   但单独存放、单独写盘, 不进 UIGF 的 "list"。
     std::optional<std::pmr::vector<NonPullEvent>> events;
     size_t migratedLegacy = 0;   // 从旧版 list 里迁出的非抽卡事件条数 (仅用于提示)
@@ -681,7 +681,7 @@ inline NSString* NSStr(std::string_view sv){
         m.existFile = _existFile.UTF8String ? _existFile.UTF8String : "";
         if(!m.existFile.empty()){
             bool loaded = false;
-            // v0.1.5.0 存档保护: 事件区读坏了同样必须中止, 不能"读不懂就当没有"然后覆盖。
+            // v0.1.4.1 存档保护: 事件区读坏了同样必须中止, 不能"读不懂就当没有"然后覆盖。
             //   eventsCorrupt 为真 = 文件里【有】non_pull_events 键, 但数组没闭合 (截断) 或
             //   存在无法解析的条目。此时原文件里那些事件是唯一的副本 —— 抽卡记录接口只保留
             //   90 天, 一旦被覆盖就永久丢失。
@@ -716,7 +716,7 @@ inline NSString* NSStr(std::string_view sv){
                            && (uint8_t)bv[0]==0xEF && (uint8_t)bv[1]==0xBB && (uint8_t)bv[2]==0xBF)
                             bv.remove_prefix(3);
 
-                        // ---- 存档一律按【结构路径】定位, 不做全文找键 (v0.1.5.0) ----
+                        // ---- 存档一律按【结构路径】定位, 不做全文找键 (v0.1.4.1) ----
                         // 抽卡数组的路径是 根.endfield[0].list, 事件数组是 根.non_pull_events。
                         // 全文找首个 "list" 在合法 JSON 上就能读错: 事件的 raw 是服务器原样
                         // 透传的对象, 未知 kind 完全可能自带 "list": [...]; 只要顶层成员顺序
@@ -754,8 +754,8 @@ inline NSString* NSStr(std::string_view sv){
                                 ++recordsMalformed; return;
                             }
 
-                            // ---- 旧版文件的自愈迁移 (v0.1.5.0) ----
-                            // v0.1.5.0 之前的版本会把非抽卡事件当成抽卡写进 list, 落地成
+                            // ---- 旧版文件的自愈迁移 (v0.1.4.1) ----
+                            // v0.1.4.1 之前的版本会把非抽卡事件当成抽卡写进 list, 落地成
                             // item_id / item_name / rank_type 全空的畸形记录 (旧版把只有
                             // seqId 的事件行照单全收, 而那些"抽卡才有"的字段本就不存在)。
                             // 这里把它们就地迁到 non_pull_events, 而不是原样写回 list ——
@@ -893,7 +893,7 @@ inline NSString* NSStr(std::string_view sv){
                 // v0.1.3.3 (A2): 判定范围扩展 —— open / fstat / mmap 失败、0 字节、以及
                 // 找不到记录数组结构 (异类/截断/损坏文件) 均归此类; 数组存在但为空属
                 // 结构正确的空数据, 不在此列 (0 条正常继续)。
-                // v0.1.5.0: 判据收紧为"按结构路径 endfield[0].list 完整读完":
+                // v0.1.4.1: 判据收紧为"按结构路径 endfield[0].list 完整读完":
                 //   键缺失、类型不对、中途被截断、数组里混进非对象元素, 全部算读不出来。
                 //   此前只要全文能定位到 "list" 就算成功, 被截断的文件里"读到的那部分"
                 //   会被当成完整历史写回去, 把尾巴永久抹掉。
@@ -938,7 +938,7 @@ inline NSString* NSStr(std::string_view sv){
                 return r;
             }
 
-            // v0.1.5.0: 事件区受损与 list 受损同等对待 —— 都中止, 都不写盘。
+            // v0.1.4.1: 事件区受损与 list 受损同等对待 —— 都中止, 都不写盘。
             //   "读不懂就当没有"在这里是危险的默认: 抽卡记录接口只保留最近 90 天, 本地文件
             //   是这些事件的唯一副本, 一旦按"读到的部分"覆盖回去, 读不出来的那些就永久没了。
             //   宁可让用户看到报错去处理, 也不要静默地少写一段。
@@ -1159,7 +1159,7 @@ inline NSString* NSStr(std::string_view sv){
             // 序列号实际不可达, 零成本加固, 与分析器 abs_ll 口径对齐)。
             long long sid = pc.isWeapon ? (long long)(0ULL - (unsigned long long)seq) : seq;
 
-            // 去重与防缺口的判定【对抽卡和非抽卡事件一视同仁】(v0.1.5.0):
+            // 去重与防缺口的判定【对抽卡和非抽卡事件一视同仁】(v0.1.4.1):
             //   两者共用同一套 seqId 序列, 都要能触发"触达本地老记录"的停止条件,
             //   否则事件行会被反复重新拉取。分类放在这些检查【之后】。
             if(m.localIds->contains(sid)){
@@ -1404,7 +1404,7 @@ inline NSString* NSStr(std::string_view sv){
             // 终末地用 "endfield" 作为自定义游戏容器 (v4.2 顶层 properties 允许新增 key)。
             //   { "info": { ... },
             //     "endfield": [ { uid, timezone, lang, list:[...] } ],
-            //     "non_pull_events": [ ... ]   // v0.1.5.0 新增, 仅在非空时出现
+            //     "non_pull_events": [ ... ]   // v0.1.4.1 新增, 仅在非空时出现
             //   }
             //
             // "non_pull_events" 是本工具的扩展键, 不属于 UIGF 标准, 也【不应】被当作抽卡
@@ -1479,7 +1479,7 @@ inline NSString* NSStr(std::string_view sv){
                 if(i < n-1) w.WriteLit(",");
                 w.WriteLit("\n");
             }
-            // ---- 非抽卡事件 (v0.1.5.0) ----
+            // ---- 非抽卡事件 (v0.1.4.1) ----
             // 放在 "endfield" 之后的顶层键。有意【不】混进 list:
             //   list 是 UIGF 定义的抽卡记录数组, 任何读这个文件的第三方工具都会按抽卡来数;
             //   而这些行不是抽卡, 混进去会让不做过滤的工具把保底水位每期多算 1 抽。
