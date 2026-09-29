@@ -206,15 +206,17 @@ struct FetcherView_iOS: View {
                 case .success(let savedURL):
                     appendLogs(["", "已保存至: \(savedURL.lastPathComponent)"])
                     pendingDocument = nil          // 工作文件早已删除, 这里只清内存文档
+                    releaseBaseFile()              // 基底已被本次结果取代
                     onFinish(savedURL)             // 传 URL, 保留外部文件访问语义
                 case .failure(let err):
                     errorMessage = "保存失败: \(err.localizedDescription)"
                     pendingDocument = nil
                 }
             }
+            // 离开拉取页时只取消任务; 基底选择保留 (安全作用域继续持有,
+            // 由移除按钮 / 替换选择 / 导出成功时释放, 进程结束时系统兜底回收)。
             .onDisappear {
                 fetchTask?.cancel()
-                releaseBaseFile()
             }
         }
     }
