@@ -41,6 +41,9 @@
 @interface GachaChartData ()
 - (void)populateFreqAll:(const int*)arr;
 - (void)populateFreqUp:(const int*)arr;
+- (void)populateECDFUp:(const int*)arr;
+- (void)populateTheoryCDFAll:(const double*)arr;
+- (void)populateTheoryCDFUp:(const double*)arr;
 - (void)populateHazardAll:(const double*)arr;
 - (void)populateHazardUp:(const double*)arr;
 @end
@@ -49,6 +52,9 @@
     // 内存安全密封在实例内部
     int    _freqAll[260];
     int    _freqUp[260];
+    int    _ecdfUp[260];
+    double _theoryCDFAll[260];
+    double _theoryCDFUp[260];
     double _hazardAll[260];
     double _hazardUp[260];
 }
@@ -62,12 +68,18 @@
 // ---- 批量拷贝接口 (Swift 一次 memcpy 拿全 260 个值) ----
 - (void)copyFreqAllInto:(int*)dst    { memcpy(dst, _freqAll,    260 * sizeof(int));    }
 - (void)copyFreqUpInto:(int*)dst     { memcpy(dst, _freqUp,     260 * sizeof(int));    }
+- (void)copyECDFUpInto:(int*)dst     { memcpy(dst, _ecdfUp,     260 * sizeof(int));    }
+- (void)copyTheoryCDFAllInto:(double*)dst { memcpy(dst, _theoryCDFAll, 260 * sizeof(double)); }
+- (void)copyTheoryCDFUpInto:(double*)dst  { memcpy(dst, _theoryCDFUp,  260 * sizeof(double)); }
 - (void)copyHazardAllInto:(double*)dst { memcpy(dst, _hazardAll, 260 * sizeof(double)); }
 - (void)copyHazardUpInto:(double*)dst  { memcpy(dst, _hazardUp,  260 * sizeof(double)); }
 
 // ---- C++ 灌入数据接口 ----
 - (void)populateFreqAll:(const int*)arr     { memcpy(_freqAll,    arr, 260 * sizeof(int));    }
 - (void)populateFreqUp:(const int*)arr      { memcpy(_freqUp,     arr, 260 * sizeof(int));    }
+- (void)populateECDFUp:(const int*)arr      { memcpy(_ecdfUp,     arr, 260 * sizeof(int));    }
+- (void)populateTheoryCDFAll:(const double*)arr { memcpy(_theoryCDFAll, arr, 260 * sizeof(double)); }
+- (void)populateTheoryCDFUp:(const double*)arr  { memcpy(_theoryCDFUp,  arr, 260 * sizeof(double)); }
 - (void)populateHazardAll:(const double*)arr { memcpy(_hazardAll, arr, 260 * sizeof(double)); }
 - (void)populateHazardUp:(const double*)arr  { memcpy(_hazardUp,  arr, 260 * sizeof(double)); }
 @end
@@ -768,26 +780,43 @@ struct KSLocation {
     double theory = 0.0;
 };
 
+// CDF 表的有效末端: 饱和到 1 或单调性破坏前的最后一格。
+// KS 与图表导出共用此判据, 辉光池的未填充哨兵不属于理论分布。
+int FindCDFLastValid(std::span<const double> cdf) {
+    constexpr double EPS_SAT = 1e-6;
+    for (int k = 1; k < (int)cdf.size(); ++k) {
+        if (cdf[k] >= 1.0 - EPS_SAT) return k;
+        if (cdf[k] + EPS_SAT < cdf[k - 1]) return k - 1;
+    }
+    return cdf.empty() ? 0 : (int)cdf.size() - 1;
+}
+
+// 图表拿到完整的 260 格 CDF; 有效区间外保持末值, 与 ComputeKS 的 lookup 一致。
+int ExportTheoryCDF(std::span<const double> cdf, std::array<double,260>& out) {
+    const int last_valid = std::min(FindCDFLastValid(cdf), (int)out.size() - 1);
+    if (cdf.empty()) {
+        out.fill(0.0);
+        return last_valid;
+    }
+    std::copy_n(cdf.begin(), last_valid + 1, out.begin());
+    std::fill(out.begin() + last_valid + 1, out.end(), cdf[last_valid]);
+    return last_valid;
+}
+
 // 修复:freq 的合法索引是 [0, 259];max_pity 必须 clamp 否则越界读
 double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,std::span<const double> cdf,
                  KSLocation* location = nullptr){
     // v0.1.3.3: "裸指针 + 长度"两个散参 → std::span (工程 C++23)。长度随表走,
-    // 调用方不可能再把表和长度传错配对; 函数体保留局部 cdf_len。
-    const int cdf_len = (int)cdf.size();
+    // 调用方不可能再把表和长度传错配对。
     if (location) *location = {};
-    if(!n) return 0.0;
+    if(!n || cdf.empty()) return 0.0;
     if(max_pity > 259) max_pity = 259;        // 防御性 clamp
     // v0.1.2.2: 找到 CDF 表的"有效末端" last_valid (饱和到 1 或单调性破坏前的最后一格).
     // 越过 last_valid 后, 用 cdf[last_valid] 而非 1.0 作 fallback —— 这对辉光池
     // (cdf 在 X=240 处 ≈ 0.93, X>240 时 CDF 仍未达 1) 很关键; 旧代码用 1.0 fallback
     // 会让长尾区域的 K-S 偏离凭空变大. 此外对"未填充哨兵段"(辉光池 cdf[241]=0)
     // 也需提前截断, 避免单调性破坏导致 |cum - 0| ≈ 1 的虚假最大偏离.
-    constexpr double EPS_SAT = 1e-6;
-    int last_valid = cdf_len - 1;
-    for (int k = 1; k < cdf_len; ++k) {
-        if (cdf[k] >= 1.0 - EPS_SAT) { last_valid = k; break; }
-        if (cdf[k] + EPS_SAT < cdf[k - 1]) { last_valid = k - 1; break; }
-    }
+    const int last_valid = FindCDFLastValid(cdf);
     auto lookup_cdf = [&](int idx) -> double {
         if (idx < 0) return 0.0;
         if (idx > last_valid) return cdf[last_valid];
@@ -835,7 +864,11 @@ inline double SampleVariance(long long sum,long long sum_sq,int n){
 // ------ 统计结果结构(内部用) ------
 struct StatsResult {
     std::array<int,260>    freq_all{}, freq_up{};
+    std::array<int,260>    freq_ecdf_up{};
     std::array<double,260> hazard_all{}, hazard_up{};
+    std::array<double,260> theory_cdf_all{}, theory_cdf_up{};
+    int theory_last_valid_all=0, theory_last_valid_up=0, ecdf_up_step_size=1;
+    double theory_tail_mean_excess_up=0;
     int count_all=0, count_up=0, win_5050=0, lose_5050=0;
     double avg_all=0, avg_up=0, avg_win=-1, cv_all=0, ci_all_err=0, ci_up_err=0;
     double win_rate_5050=-1, ks_d_all=0, ks_d_up=0;
@@ -1127,17 +1160,47 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     s.censored_pity_all = acc.censored_pity_all;
     s.censored_pity_up  = acc.censored_pity_up;
 
+    // 理论表及元数据不依赖样本数: 空数据图表也使用同一套理论。
+    // 重构寻访另用 g_cdf_refactor —— 与 g_cdf_char 只差赠送十连节点 (30 → 30/60)。
+    const std::span<const double> cdf = isWeapon
+        ? std::span<const double>(g_cdf_wep)                    // 41
+        : (isRefactor ? std::span<const double>(g_cdf_refactor) // 82
+                      : std::span<const double>(g_cdf_char));  // 82
+    // ★ UP 选表必须是一条完整闭合的 if/else 链, 新逻辑只能加在整条链结束之后。
+    // Windows 端曾因插入 if 导致 else 改绑, 把武器/辉光/重构错误覆盖成角色表。
+    std::span<const double> cdf_up;
+    if      (isJoint)    { cdf_up = g_cdf_joint_up;    }   // 242
+    else if (isWeapon)   { cdf_up = g_cdf_wep_up;      }   // 81
+    else if (isRefactor) { cdf_up = g_cdf_refactor_up; }   // 122
+    else                 { cdf_up = g_cdf_char_up;     }   // 122
+    s.theory_last_valid_all = ExportTheoryCDF(cdf, s.theory_cdf_all);
+    s.theory_last_valid_up = ExportTheoryCDF(cdf_up, s.theory_cdf_up);
+    s.theory_tail_mean_excess_up = isJoint ? g_joint_tail_mean_excess : 0.0;
+    s.ecdf_up_step_size = isWeapon ? 10 : 1;
+
+    int max_ecdf_up = acc.max_pity_up;
+    if (isWeapon) {
+        // 武器 UP 理论质量只在申领 (10 抽) 边界记账, 原始样本则记录拨内单抽落点。
+        // 统一聚合一次, KS 和 ECDF 共用此数组, 避免逐抽比较造成拨内错位。
+        // 原始 freq_up、MRL 与 avg_up 仍保留单抽粒度。
+        auto claimSlot = [&](int x) {
+            return std::min(259, ((x + s.ecdf_up_step_size - 1) / s.ecdf_up_step_size)
+                                * s.ecdf_up_step_size);
+        };
+        for (int x = 1; x <= acc.max_pity_up; ++x) {
+            s.freq_ecdf_up[claimSlot(x)] += acc.freq_up[x];
+        }
+        max_ecdf_up = claimSlot(acc.max_pity_up);
+    } else {
+        s.freq_ecdf_up = acc.freq_up;
+    }
+
     if(acc.count_all>0){
         s.avg_all = (double)acc.sum_all/acc.count_all;
         double var = SampleVariance(acc.sum_all, acc.sum_sq_all, acc.count_all);
         double sd  = std::sqrt(var);
         s.cv_all   = (s.avg_all>0) ? sd/s.avg_all : 0;
         s.ci_all_err = TCritical95(acc.count_all-1) * sd / std::sqrt((double)acc.count_all);
-        // 重构寻访另用 g_cdf_refactor —— 与 g_cdf_char 只差赠送十连节点 (30 → 30/60)
-        const std::span<const double> cdf = isWeapon
-            ? std::span<const double>(g_cdf_wep)              // 41
-            : (isRefactor ? std::span<const double>(g_cdf_refactor)   // 82
-                          : std::span<const double>(g_cdf_char));    // 82
         s.ks_d_all = ComputeKS(acc.freq_all, acc.max_pity_all, acc.count_all, cdf,
                                &s.ks_location_all);
         s.ks_is_normal = (s.ks_d_all <= 1.36/std::sqrt((double)acc.count_all));
@@ -1160,19 +1223,6 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
         s.avg_up = (double)acc.sum_up/acc.count_up;
         double var = SampleVariance(acc.sum_up, acc.sum_sq_up, acc.count_up);
         s.ci_up_err = TCritical95(acc.count_up-1) * std::sqrt(var) / std::sqrt((double)acc.count_up);
-        // UP KS 检验: 用 g_cdf_*_up
-        // v0.1.2.0: 辉光池走 g_cdf_joint_up
-        // ★ 选表必须是一条【完整闭合】的 if/else 链, 且后面不能再紧跟别的 if ——
-        //   Windows 端 v0.1.4.0 曾在这条链和它的 else 之间插进一个 if, 结果 else 改绑到了
-        //   新 if 上, 武器池/辉光池/只有 1 个 UP 的重构池全部被覆盖成 g_cdf_char_up。
-        //   编译无警告, 真实数据上武器池的 D 值从 0.2603 被抬到 0.4241。之后若要在这里
-        //   加逻辑, 请加在整条链【结束之后】, 并保持每个分支都带花括号。
-        std::span<const double> cdf_up;                        // v0.1.3.3: 长度由 span 自带
-        if      (isJoint)    { cdf_up = g_cdf_joint_up;    }   // 242
-        else if (isWeapon)   { cdf_up = g_cdf_wep_up;      }   // 81
-        else if (isRefactor) { cdf_up = g_cdf_refactor_up; }   // 122
-        else                 { cdf_up = g_cdf_char_up;     }   // 122
-
         // g_cdf_refactor_up 描述的是【系列内第一个 UP】的分布 —— 它在 n=120 强制收敛到 1,
         // 依据是「前120次寻访必定获取 UP, 该规则在同名重构寻访中仅生效 1 次」。
         // 而 freq_up 记的是每两个 UP 之间的间隔: 同一系列里第 2 个及以后的 UP 已经没有这个
@@ -1189,31 +1239,8 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
                 if (kv.second.up_count > 1) { s.ks_up_mixed = true; break; }
             }
         }
-        if (isWeapon) {
-            // v0.1.3.3 武器 UP K-S: 先把经验 freq_up 按申领 (10 抽) 粒度向上聚合再比较。
-            // 原因: g_cdf_wep_up 的质量只在 10 倍数边界记账 (申领内平坦, 机制如此),
-            // 而经验 pity_up 记录的是申领内具体单抽落点 (自然出货 ~截断几何分布,
-            // 40/80 保底强制出货的拨内落点游戏未公开)。两条阶梯粒度不同, 逐抽比较会被
-            // "拨内错位"系统性抬高 D (落点均匀假设下渐近 ~0.37, 12 期样本伪拒绝率 ~63%)。
-            // 聚合到申领边界后, 任何拨内落点都映射到同一申领, K-S 对落点假设免疫,
-            // 伪拒绝率回到 <= 名义 5% (模拟: ~2%)。
-            // K-S 用聚合副本, UP ECDF 图也按申领展示; 原始 freq_up、MRL 与 avg_up
-            // 仍保留单抽粒度。
-            std::array<int,260> freq_up_claim{};
-            for (int x = 1; x <= acc.max_pity_up; ++x) {
-                if (acc.freq_up[x] == 0) continue;
-                int slot = ((x + 9) / 10) * 10;   // 向上取整到申领末抽
-                if (slot > 259) slot = 259;       // 防御 (正常数据 pity_up <= 80)
-                freq_up_claim[slot] += acc.freq_up[x];
-            }
-            int max_claim = ((acc.max_pity_up + 9) / 10) * 10;
-            if (max_claim > 259) max_claim = 259;
-            s.ks_d_up = ComputeKS(freq_up_claim, max_claim, acc.count_up, cdf_up,
-                                  &s.ks_location_up);
-        } else {
-            s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up,
-                                  &s.ks_location_up);
-        }
+        s.ks_d_up = ComputeKS(s.freq_ecdf_up, max_ecdf_up, acc.count_up, cdf_up,
+                              &s.ks_location_up);
         s.ks_is_normal_up = (s.ks_d_up <= 1.36/std::sqrt((double)acc.count_up));
     }
     // UP hazard 同理。风险集含【全部】删失观测 (非重构池恒为 0 或 1 条, 与旧行为逐位一致)。
@@ -1241,6 +1268,9 @@ GachaChartData* ToChartData(const StatsResult& s) {
     GachaChartData* d = [[GachaChartData alloc] init];
     [d populateFreqAll:   s.freq_all.data()];
     [d populateFreqUp:    s.freq_up.data()];
+    [d populateECDFUp:    s.freq_ecdf_up.data()];
+    [d populateTheoryCDFAll: s.theory_cdf_all.data()];
+    [d populateTheoryCDFUp:  s.theory_cdf_up.data()];
     [d populateHazardAll: s.hazard_all.data()];
     [d populateHazardUp:  s.hazard_up.data()];
 
@@ -1268,6 +1298,10 @@ GachaChartData* ToChartData(const StatsResult& s) {
     d.ksUpMixed         = s.ks_up_mixed;
     d.censoredPityAll   = s.censored_pity_all;
     d.censoredPityUp    = s.censored_pity_up;
+    d.theoryLastValidAll = s.theory_last_valid_all;
+    d.theoryLastValidUp = s.theory_last_valid_up;
+    d.ecdfUpStepSize    = s.ecdf_up_step_size;
+    d.theoryTailMeanExcessUp = s.theory_tail_mean_excess_up;
     return d;
 }
 

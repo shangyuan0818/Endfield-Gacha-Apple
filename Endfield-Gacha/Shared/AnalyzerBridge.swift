@@ -33,6 +33,15 @@ struct ChartData: Sendable {
     // v0.1.2.0: 数组从 150 扩到 260, 容纳辉光池 0..240 的 pity 范围.
     var freq_all:   [Int32]  = Array(repeating: 0,   count: 260)
     var freq_up:    [Int32]  = Array(repeating: 0,   count: 260)
+    // ECDF 与 KS 共用后端频数；原始 freq_up 仍用于 MRL。
+    var freq_ecdf_up: [Int32] = Array(repeating: 0, count: 260)
+    // 理论值及其有效终点均由统计核心提供，零样本也有完整理论数据。
+    var theory_cdf_all: [Double] = Array(repeating: 0.0, count: 260)
+    var theory_cdf_up: [Double] = Array(repeating: 0.0, count: 260)
+    var theory_last_valid_all: Int = 0
+    var theory_last_valid_up: Int = 0
+    var ecdf_up_step_size: Int = 1
+    var theory_tail_mean_excess_up: Double = 0
     var hazard_all: [Double] = Array(repeating: 0.0, count: 260)
     var hazard_up:  [Double] = Array(repeating: 0.0, count: 260)
     var count_all:  Int    = 0
@@ -79,7 +88,7 @@ struct AnalysisBundleResult {
     var charts: AnalysisBundle?
 }
 
-// MARK: - ObjC → Swift 转换 (4 次批量 memcpy 替代 600 次 msgSend)
+// MARK: - ObjC → Swift 转换 (批量复制频数、理论 CDF 和风险函数)
 //
 // 关键: 必须标记 nonisolated。
 // 因为以前 AnalysisBundleResult.charts 引用了 ContentView.AnalysisBundle (SwiftUI View),
@@ -99,6 +108,15 @@ nonisolated private func toChartData(_ d: GachaChartData) -> ChartData {
     c.freq_up.withUnsafeMutableBufferPointer { buf in
         if let base = buf.baseAddress { d.copyFreqUp(into: base) }
     }
+    c.freq_ecdf_up.withUnsafeMutableBufferPointer { buf in
+        if let base = buf.baseAddress { d.copyECDFUp(into: base) }
+    }
+    c.theory_cdf_all.withUnsafeMutableBufferPointer { buf in
+        if let base = buf.baseAddress { d.copyTheoryCDFAll(into: base) }
+    }
+    c.theory_cdf_up.withUnsafeMutableBufferPointer { buf in
+        if let base = buf.baseAddress { d.copyTheoryCDFUp(into: base) }
+    }
     c.hazard_all.withUnsafeMutableBufferPointer { buf in
         if let base = buf.baseAddress { d.copyHazardAll(into: base) }
     }
@@ -107,6 +125,10 @@ nonisolated private func toChartData(_ d: GachaChartData) -> ChartData {
     }
 
     // 映射标量数值属性
+    c.theory_last_valid_all = d.theoryLastValidAll
+    c.theory_last_valid_up = d.theoryLastValidUp
+    c.ecdf_up_step_size = d.ecdfUpStepSize
+    c.theory_tail_mean_excess_up = d.theoryTailMeanExcessUp
     c.count_all         = d.countAll
     c.count_up          = d.countUp
     c.avg_all           = d.avgAll

@@ -42,6 +42,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL ksUpMixed;
 @property (nonatomic) NSInteger censoredPityAll;
 @property (nonatomic) NSInteger censoredPityUp;
+// 理论 CDF 的有效末端及 ECDF 粒度由 C++ 统一提供, 无样本时也有效。
+@property (nonatomic) NSInteger theoryLastValidAll;
+@property (nonatomic) NSInteger theoryLastValidUp;
+@property (nonatomic) NSInteger ecdfUpStepSize;
+// 辉光 UP 的 E[X - lastValid | X > lastValid], 其余池为 0。
+@property (nonatomic) double theoryTailMeanExcessUp;
 
 // 单点查询接口（保留向后兼容；Swift 端可以选择不用）
 - (int)freqAllAt:(NSInteger)index;
@@ -50,11 +56,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (double)hazardUpAt:(NSInteger)index;
 
 // 批量拷贝接口：Swift 用 UnsafeMutableBufferPointer 一次拿全 260 个值，
-// 比 1040 次 ObjC msgSend 快两个数量级。
+// 避免逐元素 ObjC msgSend。
 // dst 必须至少有 260 个元素的容量。
 // v0.1.2.0: 数组从 150 扩到 260, 容纳辉光池 0..240 的 pity 范围.
 - (void)copyFreqAllInto:(int * _Nonnull)dst;
 - (void)copyFreqUpInto:(int * _Nonnull)dst;
+// UP ECDF / KS 专用频数: 武器已按十连申领聚合, 原始频数仍供 MRL 使用。
+- (void)copyECDFUpInto:(int * _Nonnull)dst NS_SWIFT_NAME(copyECDFUp(into:));
+// 有效末端之后保持最后有效 CDF 值, 不导出未填充哨兵。
+- (void)copyTheoryCDFAllInto:(double * _Nonnull)dst NS_SWIFT_NAME(copyTheoryCDFAll(into:));
+- (void)copyTheoryCDFUpInto:(double * _Nonnull)dst NS_SWIFT_NAME(copyTheoryCDFUp(into:));
 - (void)copyHazardAllInto:(double * _Nonnull)dst;
 - (void)copyHazardUpInto:(double * _Nonnull)dst;
 

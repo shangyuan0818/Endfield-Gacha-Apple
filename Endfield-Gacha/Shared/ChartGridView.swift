@@ -59,426 +59,7 @@ enum ChartGridLayout {
     case vertical         // iPhone:纵向堆叠
 }
 
-// MARK: - 理论 CDF (与 Windows / Analyzer InitCDFTables 完全对齐)
-//
-// charPool / wepPool: 综合 6★ 的 CDF (任意 6★)
-// charPoolUP / wepPoolUP: 当期 UP 的 CDF (考虑歪率 + 各自硬保底)
-private struct TheoryCDF {
-    // 角色寻访的基础六星概率 (客户端 GachaCharPoolTypeTable: star6BaseRate = 8000 → 0.8%)。
-    // 赠送十连(加急招募)恒按【基础概率】判定, 不吃 66 抽起的软保底加成 —— 官方原文
-    // 「加急招募的干员获取概率与本次寻访的基础概率一致」, 且其结果不计入保底计数。
-    // 与 AnalyzerWrapper.mm 的 kBaseRate6 同源, 两边必须一起改。
-    static let baseRate6 = 0.008
-
-    // ===== 角色综合 6★ =====
-    static let charPool: [Double] = {
-        var cdf = [Double](repeating: 0, count: 82)
-        var surv = 1.0
-        for i in 1...80 {
-            let p: Double
-            if i == 30      { p = 1.0 - pow(1.0 - 0.008, 11) }   // 第30抽合并11次判定
-            else if i <= 65 { p = 0.008 }
-            else if i <= 79 { p = 0.058 + Double(i - 66) * 0.05 }
-            else            { p = 1.0 }
-            let pp = min(p, 1.0)
-            cdf[i] = cdf[i-1] + surv * pp
-            surv *= (1.0 - pp)
-        }
-        cdf[81] = 1.0
-        return cdf
-    }()
-
-    // ===== 武器综合 6★ (单抽近似版) =====
-    static let wepPool: [Double] = {
-        var cdf = [Double](repeating: 0, count: 41)
-        var surv = 1.0
-        let bh = 0.04, bm = 0.96
-        for k in 1...30 {
-            cdf[k] = cdf[k-1] + surv * bh
-            surv *= bm
-        }
-        let norm = 1.0 - pow(bm, 10)
-        var ls = 1.0
-        for k in 31...40 {
-            cdf[k] = cdf[k-1] + surv * (ls * bh / norm)
-            ls *= bm
-        }
-        cdf[40] = 1.0
-        return cdf
-    }()
-
-    // ===== 角色当期 UP =====
-    // 修正 (与 C++ AnalyzerWrapper.mm 的角色 UP CDF 完全一致, 消除图表理论曲线与文本统计/
-    //   K-S 检验的分布漂移): 终末地特许寻访【没有原神/米池式大保底】—— 小保底歪了之后,
-    //   下一次出六星仍是独立 50/50, 可以连续歪多次。唯一兜底是【第 120 抽硬保底】(本期累计
-    //   120 抽必出 UP), 每期独立、不继承。
-    //   => 状态退化为单维 D[s] (与武器/辉光池同构), n=120 强制所有"尚未出 UP"的存活者毕业。
-    //   D[s]: 水位 s ∈ [0,80), 概率质量 = "尚未出 UP"的人群。
-    //   每抽: 不出货 → D[s]×(1-ph) 推进到 s+1; 出货(独立 50/50) → 50% 毕业(出 UP),
-    //         50% 歪(水位归 0, 仍未出 UP)。n=30: 1 本体抽(推进水位) + 10 免费抽(水位停)。
-    //
-    // 历史: 旧版 v0.1.1.1 误用"歪→下次必中"双状态 D[h][s], E[首UP] ≈ 74.16, 与社区 74.33
-    //   看似吻合 —— 实则 74.33 是【净成本】(扣前 5 抽免费), 原始抽真值 = 74.33 + 5 ≈ 79.29;
-    //   74.16 只是数值巧合, 掩盖了"终末地根本没有该大保底"这个 bug。本版改回单维 + 120 硬保底,
-    //   E[首UP] = 79.29 原始抽 (CDF@80 ≈ 57.59%, @100 ≈ 62.80%, @119 ≈ 67.24%)。
-    static let charPoolUP: [Double] = {
-        let hardCap = 120
-        let maxSoftPity = 80
-        var cdf = [Double](repeating: 0, count: hardCap + 2)
-
-        func h(_ k: Int) -> Double {
-            if k <= 65       { return 0.008 }
-            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
-            else             { return 1.0 }
-        }
-
-        // 单维状态: D[s] = 水位 s 且"尚未出 UP"的概率 (无大保底标志, 每次出货独立 50/50)
-        var D = [Double](repeating: 0, count: maxSoftPity)
-        D[0] = 1.0
-        var cum = 0.0
-
-        for n in 1...hardCap {
-            if n == hardCap {
-                // 120 硬保底: 所有"尚未出 UP"的存活者强制毕业
-                let alive = D.reduce(0, +)
-                cum += alive
-                cdf[n] = min(1.0, cum)
-                for k in (n + 1)...(hardCap + 1) { cdf[k] = 1.0 }
-                break
-            }
-
-            if n == 30 {
-                // 1 本体抽 (推进水位) + 10 免费抽 (水位停)
-                var stateA = [Double](repeating: 0, count: maxSoftPity)
-                var pFinish = 0.0
-                for s in 0..<maxSoftPity where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoftPity { stateA[s + 1] += D[s] * (1 - ph) }
-                    pFinish   += D[s] * ph * 0.5   // 毕业 (出 UP)
-                    stateA[0] += D[s] * ph * 0.5   // 歪, 水位归 0 (本体抽)
-                }
-                for _ in 0..<10 {
-                    var stateB = [Double](repeating: 0, count: maxSoftPity)
-                    for s in 0..<maxSoftPity where stateA[s] > 0 {
-                        // 赠送十连走【基础概率】, 不吃软保底加成。本池只有 n=30 一个赠送
-                        // 节点, 此时水位 s <= 30 < 66, h() 本来就等于基础概率, 故数值不变;
-                        // 改写成 baseRate6 是为了与重构寻访 (赠送节点到 n=90, 存活水位可
-                        // 进入 66..79 的软保底段) 用同一套口径。
-                        let ph = baseRate6
-                        stateB[s] += stateA[s] * (1 - ph)   // 不出货, 水位停
-                        pFinish   += stateA[s] * ph * 0.5   // 毕业 (出 UP)
-                        stateB[s] += stateA[s] * ph * 0.5   // 歪, 水位停 (免费抽)
-                    }
-                    stateA = stateB
-                }
-                cum += pFinish
-                cdf[n] = min(1.0, cum)
-                D = stateA
-            } else {
-                var newD = [Double](repeating: 0, count: maxSoftPity)
-                var pFinish = 0.0
-                for s in 0..<maxSoftPity where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoftPity { newD[s + 1] += D[s] * (1 - ph) }
-                    pFinish += D[s] * ph * 0.5   // 毕业 (出 UP)
-                    newD[0] += D[s] * ph * 0.5   // 歪, 水位归 0
-                }
-                cum += pFinish
-                cdf[n] = min(1.0, cum)
-                D = newD
-            }
-        }
-        return cdf
-    }()
-
-    // ===== 重构寻访 综合 6★ (v0.1.4.0) =====
-    // 「重构寻访」(RE-Factor Headhunting) 是 1.5「雪凇幽梦」新增的第五种角色寻访类型。
-    // 数值与特许寻访逐字段相同 (0.8% 基础 / 66 抽起 +5% 软保底 / 80 抽硬保底 / 120 抽 UP
-    // 硬保底), 唯一差异是赠送十连从 1 次 (累计 30 抽) 变成 3 次 (累计 30/60/90 抽)。
-    // 本表与 charPool 的唯一差别: 赠送十连的合并 hazard 节点从「只有 30」变成「30 和 60」。
-    // 为什么没有 90: 本表按【距上次六星的抽数 x】索引, 80 抽硬保底保证 x <= 80, 所以
-    //   累计第 90 抽的那次赠送十连在本表坐标系里不可达 (它只能发生在某次六星之后, 水位
-    //   已归零)。经验侧第 3 块并入节点 60, 与 AnalyzerWrapper.mm 的 free_node_all 一致。
-    // E[首六星] ≈ 51.37 (特许 51.81)。官方规则: https://endfield.hypergryph.com/news/4776
-    static let refactorPool: [Double] = {
-        var cdf = [Double](repeating: 0, count: 82)
-        var surv = 1.0
-        for i in 1...80 {
-            let p: Double
-            if i == 30 || i == 60 { p = 1.0 - pow(1.0 - baseRate6, 11) }  // 本体 1 抽 + 免费十连 10 抽
-            else if i <= 65       { p = 0.008 }
-            else if i <= 79       { p = 0.058 + Double(i - 66) * 0.05 }
-            else                  { p = 1.0 }
-            let pp = min(p, 1.0)
-            cdf[i] = cdf[i-1] + surv * pp
-            surv *= (1.0 - pp)
-        }
-        cdf[81] = 1.0
-        return cdf
-    }()
-
-    // ===== 重构寻访 当期 UP (v0.1.4.0) =====
-    // 与 charPoolUP 同构 (单维水位状态 + 每次出货独立 50/50 + n=120 硬保底强制毕业),
-    // 唯一差别: 赠送十连展开点从 {30} 变成 {30, 60, 90}。本表按【累计抽数 n】索引,
-    // 三个里程碑都能精确表达。E[首 UP] ≈ 77.83 (特许 79.29)。
-    //
-    // 【重要假设 — 官方未公布】P(UP | 出六星) = 50%, 沿用特许寻访, 依据是两池其余参数
-    //   逐字段相同。待开池后用游戏内概率公示页核对。
-    // 【作用域】官方原文: 80 抽小保底「所有『重构寻访』共享…继承到其他『重构寻访』」;
-    //   120 抽 UP 保底「在同名重构寻访中仅生效 1 次, 计数继承到后续同名重构寻访」。
-    //   故本表描述的是【系列内第一个 UP】的分布; 样本里一旦出现第 2 个 UP 就成了混合
-    //   分布, 由 ChartData.ks_up_mixed 标记, 文本侧不再作"符合/偏离"判定。
-    static let refactorPoolUP: [Double] = {
-        let hardCap = 120
-        let maxSoftPity = 80
-        var cdf = [Double](repeating: 0, count: hardCap + 2)
-
-        func h(_ k: Int) -> Double {
-            if k <= 65       { return 0.008 }
-            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
-            else             { return 1.0 }
-        }
-
-        var D = [Double](repeating: 0, count: maxSoftPity)
-        D[0] = 1.0
-        var cum = 0.0
-
-        for n in 1...hardCap {
-            if n == hardCap {
-                let alive = D.reduce(0, +)
-                cum += alive
-                cdf[n] = min(1.0, cum)
-                for k in (n + 1)...(hardCap + 1) { cdf[k] = 1.0 }
-                break
-            }
-
-            var newD = [Double](repeating: 0, count: maxSoftPity)
-            var pHitGrad = 0.0
-
-            if n == 30 || n == 60 || n == 90 {
-                // 赠送十连里程碑: 11 次独立判定 (本体抽 1 次 + 免费十连 10 次)
-                var stateA = [Double](repeating: 0, count: maxSoftPity)
-                for s in 0..<maxSoftPity where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoftPity { stateA[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad  += D[s] * ph * 0.5   // 毕业 (出 UP)
-                    stateA[0] += D[s] * ph * 0.5   // 歪, 水位归 0 (本体抽)
-                }
-                for _ in 0..<10 {
-                    var newStateA = [Double](repeating: 0, count: maxSoftPity)
-                    for s in 0..<maxSoftPity where stateA[s] > 0 {
-                        // 赠送十连走【基础概率】: 第 3 个节点在 n=90, 存活水位可以到
-                        // 66..79 的软保底段 —— 若沿用 h(), 免费单抽会被算成最高 30.8%
-                        // 的出货率 (基础是 0.8%)。
-                        let ph = baseRate6
-                        newStateA[s] += stateA[s] * (1 - ph)   // 不出货, 水位停
-                        pHitGrad     += stateA[s] * ph * 0.5   // 毕业 (出 UP)
-                        newStateA[s] += stateA[s] * ph * 0.5   // 歪, 水位停 (免费抽)
-                    }
-                    stateA = newStateA
-                }
-                newD = stateA
-            } else {
-                for s in 0..<maxSoftPity where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoftPity { newD[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad += D[s] * ph * 0.5
-                    newD[0]  += D[s] * ph * 0.5
-                }
-            }
-
-            cum += pHitGrad
-            cdf[n] = min(1.0, cum)
-            D = newD
-        }
-        return cdf
-    }()
-
-    // ===== 武器当期 UP =====
-    // 4×8 状态机: ns ∈ [0,3] 已连续多少 10-pull 没出 6★;
-    //             nf ∈ [0,7] 已连续多少 10-pull 没出 featured。
-    // 40 抽 6★ pity + 80 抽 featured pity. CDF 只在 10 倍数边界跳变。
-    static let wepPoolUP: [Double] = {
-        let s = 1.0 - pow(0.99, 10.0)
-        let u = pow(0.99, 10.0) - pow(0.96, 10.0)
-        let v = pow(0.96, 10.0)
-        let sPity = 1.0 - 0.75 * pow(0.99, 9.0)
-
-        var state = [[Double]](repeating: [Double](repeating: 0, count: 8), count: 4)
-        state[0][0] = 1.0
-        var finishPer10: [Double] = []
-
-        for _ in 0..<8 {
-            var newState = [[Double]](repeating: [Double](repeating: 0, count: 8), count: 4)
-            var pFeat = 0.0
-            for ns in 0..<4 {
-                for nf in 0..<8 {
-                    let prob = state[ns][nf]
-                    if prob == 0 { continue }
-                    if nf == 7 {
-                        pFeat += prob
-                        continue
-                    }
-                    if ns == 3 {
-                        pFeat += prob * sPity
-                        newState[0][nf + 1] += prob * (1 - sPity)
-                    } else {
-                        pFeat += prob * s
-                        newState[0][nf + 1]      += prob * u
-                        newState[ns + 1][nf + 1] += prob * v
-                    }
-                }
-            }
-            finishPer10.append(pFeat)
-            state = newState
-        }
-
-        var cdf = [Double](repeating: 0, count: 81)
-        var cum = 0.0
-        for k in 0..<8 {
-            cum += finishPer10[k]
-            let pullEnd = (k + 1) * 10
-            cdf[pullEnd] = min(1.0, cum)
-        }
-        for i in 1...80 {
-            if i % 10 != 0 {
-                cdf[i] = cdf[(i / 10) * 10]
-            }
-        }
-        return cdf
-    }()
-
-    // ===== 辉光庆典 UP (v0.1.2.4) =====
-    //
-    // 与 Special 池机制差异:
-    //   (1) 4 个 6 星均匀分布: 2 限定 + 2 常驻, P(限定|六星) = 50%
-    //   (2) 没有"大保底"——歪了下一次不保证是限定
-    //   (3) 没有 120 抽 UP 硬保底
-    //   (4) n=30 处赠送 10 次免费十连 (水位停)
-    //
-    // 等价模型: 重复独立"出 6 星"周期, 每周期 50% 出限定 (即停止).
-    // 完整理论期望: E[首限定] ≈ 104.68 抽.
-    //
-    // CDF 截到 X=240 (与图表 X 轴一致, 数组 [0..240]).
-    // CDF[240] ≈ 0.93, 长尾 ~7% 用 jointTailMeanExcess 单点近似补回 MRL.
-    static let jointPoolUP: [Double] = {
-        let maxSoft = 80
-        let maxN    = 240
-        func h(_ k: Int) -> Double {
-            if k <= 65       { return 0.008 }
-            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
-            else             { return 1.0 }
-        }
-        var cdf = [Double](repeating: 0, count: maxN + 2)
-        var D = [Double](repeating: 0, count: maxSoft)
-        D[0] = 1.0
-        var cum = 0.0
-
-        for n in 1...maxN {
-            var newD = [Double](repeating: 0, count: maxSoft)
-            var pHitGrad = 0.0
-
-            if n == 30 {
-                // 1 本体抽 + 10 免费十连 (水位停)
-                var stateA = [Double](repeating: 0, count: maxSoft)
-                for s in 0..<maxSoft where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoft { stateA[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad   += D[s] * ph * 0.5
-                    stateA[0]  += D[s] * ph * 0.5
-                }
-                for _ in 0..<10 {
-                    var newStateA = [Double](repeating: 0, count: maxSoft)
-                    for s in 0..<maxSoft where stateA[s] > 0 {
-                        let ph = baseRate6   // 赠送十连走基础概率, 不吃软保底加成
-                        newStateA[s] += stateA[s] * (1 - ph)
-                        pHitGrad     += stateA[s] * ph * 0.5
-                        newStateA[s] += stateA[s] * ph * 0.5
-                    }
-                    stateA = newStateA
-                }
-                newD = stateA
-            } else {
-                for s in 0..<maxSoft where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoft { newD[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad += D[s] * ph * 0.5
-                    newD[0]  += D[s] * ph * 0.5
-                }
-            }
-            cum += pHitGrad
-            cdf[n] = min(1.0, cum)
-            D = newD
-        }
-        return cdf
-    }()
-
-    // jointTailMeanExcess = E[首限定 | 首限定 > 240] - 240 ≈ 84.37
-    //
-    // 数学动机: 辉光池 CDF[240] ≈ 0.93, 截断丢掉 ~7% 长尾质量, 直接算 MRL[0]
-    // 会从真值 ~104.68 跌到 ~82. 用单点近似 (位置 240+84.37, 质量 1-cdf[240])
-    // 补回 MRL[t] += (240 + tail_mean_excess - t) × (1 - cdf[240]).
-    //
-    // 与 Windows / ObjC 端 v0.1.2.4 实现完全一致: 临时跑 simulate 到 n=2000
-    // 累加尾部 Σ k·pdf[k] / Σ pdf[k]. 动态计算保证未来机制改动自动跟上.
-    static let jointTailMeanExcess: Double = {
-        let maxSoft = 80
-        let maxN    = 240
-        let tailSimN = 2000
-        func h(_ k: Int) -> Double {
-            if k <= 65       { return 0.008 }
-            else if k <= 79  { return 0.058 + Double(k - 66) * 0.05 }
-            else             { return 1.0 }
-        }
-        var D = [Double](repeating: 0, count: maxSoft)
-        D[0] = 1.0
-        var tailSumKPdf = 0.0
-        var tailMass    = 0.0
-
-        for n in 1...tailSimN {
-            var newD = [Double](repeating: 0, count: maxSoft)
-            var pHitGrad = 0.0
-
-            if n == 30 {
-                var stateA = [Double](repeating: 0, count: maxSoft)
-                for s in 0..<maxSoft where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoft { stateA[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad  += D[s] * ph * 0.5
-                    stateA[0] += D[s] * ph * 0.5
-                }
-                for _ in 0..<10 {
-                    var newStateA = [Double](repeating: 0, count: maxSoft)
-                    for s in 0..<maxSoft where stateA[s] > 0 {
-                        let ph = baseRate6   // 赠送十连走基础概率, 不吃软保底加成
-                        newStateA[s] += stateA[s] * (1 - ph)
-                        pHitGrad     += stateA[s] * ph * 0.5
-                        newStateA[s] += stateA[s] * ph * 0.5
-                    }
-                    stateA = newStateA
-                }
-                newD = stateA
-            } else {
-                for s in 0..<maxSoft where D[s] > 0 {
-                    let ph = h(s + 1)
-                    if s + 1 < maxSoft { newD[s + 1] += D[s] * (1 - ph) }
-                    pHitGrad += D[s] * ph * 0.5
-                    newD[0]  += D[s] * ph * 0.5
-                }
-            }
-
-            let pdfN = pHitGrad
-            if n > maxN {
-                tailSumKPdf += Double(n) * pdfN
-                tailMass    += pdfN
-            }
-            D = newD
-        }
-        guard tailMass > 1e-12 else { return 0.0 }
-        return tailSumKPdf / tailMass - Double(maxN)
-    }()
-}
-
+// 理论 CDF、有效终点及辉光长尾参数统一来自 AnalyzerBridge。
 struct ChartGridView: View {
     let statsChar:     ChartData
     let statsJoint:    ChartData   // v0.1.2.0: 辉光庆典池
@@ -544,15 +125,17 @@ struct ChartGridView: View {
     // MARK: 8 张图的具体配置(只写一次,两种布局共用)
     private var charECDF: some View {
         ECDFCanvas(title: "角色 (特许寻访) 累积分布 (ECDF)",
-                   freq_all: statsChar.freq_all, freq_up: statsChar.freq_up,
+                   freq_all: statsChar.freq_all, freq_up: statsChar.freq_ecdf_up,
                    count_all: statsChar.count_all, count_up: statsChar.count_up,
                    censored_all: statsChar.censored_pity_all,
                    censored_up:  statsChar.censored_pity_up,
-                   theoryCDF: TheoryCDF.charPool,
-                   theoryCDFUp: TheoryCDF.charPoolUP,
+                   theoryCDF: statsChar.theory_cdf_all,
+                   theoryCDFUp: statsChar.theory_cdf_up,
+                   theoryAllCap: statsChar.theory_last_valid_all,
+                   theoryUpCap: statsChar.theory_last_valid_up,
                    ksAll: statsChar.ks_marker_all, ksUp: statsChar.ks_marker_up,
                    limitBase: 120,
-                   ecdfUpStepSize: 1)
+                   ecdfUpStepSize: statsChar.ecdf_up_step_size)
     }
     private var charMRL: some View {
         MRLCanvas(title: "角色 (特许寻访) 剩余抽数期望 (MRL)",
@@ -560,24 +143,28 @@ struct ChartGridView: View {
                   count_all: statsChar.count_all, count_up: statsChar.count_up,
                   censored_all: statsChar.censored_pity_all,
                   censored_up:  statsChar.censored_pity_up,
-                  theoryCDF: TheoryCDF.charPool,
-                  theoryCDFUp: TheoryCDF.charPoolUP,
+                  theoryCDF: statsChar.theory_cdf_all,
+                  theoryCDFUp: statsChar.theory_cdf_up,
                   limitBase: 120,
-                  theoryAllCap: 80, theoryUpCap: 120)
+                  theoryAllCap: statsChar.theory_last_valid_all,
+                  theoryUpCap: statsChar.theory_last_valid_up,
+                  tailMeanExcessUp: statsChar.theory_tail_mean_excess_up)
     }
     // v0.1.2.0/4: 辉光庆典池图表. ECDF 红线只画到 X=240 (CDF 在此处 ~0.93,
     // 长尾质量通过 tailMeanExcessUp 在 MRL 计算中补回).
     private var jointECDF: some View {
         ECDFCanvas(title: "角色 (辉光庆典) 累积分布 (ECDF)",
-                   freq_all: statsJoint.freq_all, freq_up: statsJoint.freq_up,
+                   freq_all: statsJoint.freq_all, freq_up: statsJoint.freq_ecdf_up,
                    count_all: statsJoint.count_all, count_up: statsJoint.count_up,
                    censored_all: statsJoint.censored_pity_all,
                    censored_up:  statsJoint.censored_pity_up,
-                   theoryCDF: TheoryCDF.charPool,
-                   theoryCDFUp: TheoryCDF.jointPoolUP,
+                   theoryCDF: statsJoint.theory_cdf_all,
+                   theoryCDFUp: statsJoint.theory_cdf_up,
+                   theoryAllCap: statsJoint.theory_last_valid_all,
+                   theoryUpCap: statsJoint.theory_last_valid_up,
                    ksAll: statsJoint.ks_marker_all, ksUp: statsJoint.ks_marker_up,
                    limitBase: 240,
-                   ecdfUpStepSize: 1)
+                   ecdfUpStepSize: statsJoint.ecdf_up_step_size)
     }
     private var jointMRL: some View {
         MRLCanvas(title: "角色 (辉光庆典) 剩余抽数期望 (MRL)",
@@ -585,26 +172,29 @@ struct ChartGridView: View {
                   count_all: statsJoint.count_all, count_up: statsJoint.count_up,
                   censored_all: statsJoint.censored_pity_all,
                   censored_up:  statsJoint.censored_pity_up,
-                  theoryCDF: TheoryCDF.charPool,
-                  theoryCDFUp: TheoryCDF.jointPoolUP,
+                  theoryCDF: statsJoint.theory_cdf_all,
+                  theoryCDFUp: statsJoint.theory_cdf_up,
                   limitBase: 240,
-                  theoryAllCap: 80, theoryUpCap: 240,
-                  tailMeanExcessUp: TheoryCDF.jointTailMeanExcess)
+                  theoryAllCap: statsJoint.theory_last_valid_all,
+                  theoryUpCap: statsJoint.theory_last_valid_up,
+                  tailMeanExcessUp: statsJoint.theory_tail_mean_excess_up)
     }
     // v0.1.4.0: 重构寻访图表。池中六星只有 6 个 = 当期 UP + 5 名常驻 (不含往期滞留的
     // 限定角), 所以"非常驻 = UP"这条判定在本池是严格成立的 —— 比特许池 (8 个六星, 含
     // 前两期限定) 还干净。X 轴与特许池一致取 120 (UP 硬保底), MRL 理论上限同为 80 / 120。
     private var refactorECDF: some View {
         ECDFCanvas(title: "角色 (重构寻访) 累积分布 (ECDF)",
-                   freq_all: statsRefactor.freq_all, freq_up: statsRefactor.freq_up,
+                   freq_all: statsRefactor.freq_all, freq_up: statsRefactor.freq_ecdf_up,
                    count_all: statsRefactor.count_all, count_up: statsRefactor.count_up,
                    censored_all: statsRefactor.censored_pity_all,
                    censored_up:  statsRefactor.censored_pity_up,
-                   theoryCDF: TheoryCDF.refactorPool,
-                   theoryCDFUp: TheoryCDF.refactorPoolUP,
+                   theoryCDF: statsRefactor.theory_cdf_all,
+                   theoryCDFUp: statsRefactor.theory_cdf_up,
+                   theoryAllCap: statsRefactor.theory_last_valid_all,
+                   theoryUpCap: statsRefactor.theory_last_valid_up,
                    ksAll: statsRefactor.ks_marker_all, ksUp: statsRefactor.ks_marker_up,
                    limitBase: 120,
-                   ecdfUpStepSize: 1,
+                   ecdfUpStepSize: statsRefactor.ecdf_up_step_size,
                    upSamplesMixed: statsRefactor.ks_up_mixed)
     }
     private var refactorMRL: some View {
@@ -613,22 +203,26 @@ struct ChartGridView: View {
                   count_all: statsRefactor.count_all, count_up: statsRefactor.count_up,
                   censored_all: statsRefactor.censored_pity_all,
                   censored_up:  statsRefactor.censored_pity_up,
-                  theoryCDF: TheoryCDF.refactorPool,
-                  theoryCDFUp: TheoryCDF.refactorPoolUP,
+                  theoryCDF: statsRefactor.theory_cdf_all,
+                  theoryCDFUp: statsRefactor.theory_cdf_up,
                   limitBase: 120,
-                  theoryAllCap: 80, theoryUpCap: 120)
+                  theoryAllCap: statsRefactor.theory_last_valid_all,
+                  theoryUpCap: statsRefactor.theory_last_valid_up,
+                  tailMeanExcessUp: statsRefactor.theory_tail_mean_excess_up)
     }
     private var wepECDF: some View {
         ECDFCanvas(title: "武器累积分布 (ECDF)",
-                   freq_all: statsWep.freq_all, freq_up: statsWep.freq_up,
+                   freq_all: statsWep.freq_all, freq_up: statsWep.freq_ecdf_up,
                    count_all: statsWep.count_all, count_up: statsWep.count_up,
                    censored_all: statsWep.censored_pity_all,
                    censored_up:  statsWep.censored_pity_up,
-                   theoryCDF: TheoryCDF.wepPool,
-                   theoryCDFUp: TheoryCDF.wepPoolUP,
+                   theoryCDF: statsWep.theory_cdf_all,
+                   theoryCDFUp: statsWep.theory_cdf_up,
+                   theoryAllCap: statsWep.theory_last_valid_all,
+                   theoryUpCap: statsWep.theory_last_valid_up,
                    ksAll: statsWep.ks_marker_all, ksUp: statsWep.ks_marker_up,
                    limitBase: 80,
-                   ecdfUpStepSize: 10)
+                   ecdfUpStepSize: statsWep.ecdf_up_step_size)
     }
     private var wepMRL: some View {
         MRLCanvas(title: "武器剩余抽数期望 (MRL)",
@@ -636,10 +230,12 @@ struct ChartGridView: View {
                   count_all: statsWep.count_all, count_up: statsWep.count_up,
                   censored_all: statsWep.censored_pity_all,
                   censored_up:  statsWep.censored_pity_up,
-                  theoryCDF: TheoryCDF.wepPool,
-                  theoryCDFUp: TheoryCDF.wepPoolUP,
+                  theoryCDF: statsWep.theory_cdf_all,
+                  theoryCDFUp: statsWep.theory_cdf_up,
                   limitBase: 80,
-                  theoryAllCap: 40, theoryUpCap: 80)
+                  theoryAllCap: statsWep.theory_last_valid_all,
+                  theoryUpCap: statsWep.theory_last_valid_up,
+                  tailMeanExcessUp: statsWep.theory_tail_mean_excess_up)
     }
 }
 
@@ -657,6 +253,7 @@ private enum KSLabelAnchor {
 struct ECDFCanvas: View {
     let title: String
     let freq_all: [Int32]
+    /// 直接使用后端导出的 ECDF 频数，武器 UP 已按申领聚合。
     let freq_up:  [Int32]
     let count_all: Int
     let count_up:  Int
@@ -664,12 +261,13 @@ struct ECDFCanvas: View {
     let censored_up:  Int
     let theoryCDF: [Double]
     let theoryCDFUp: [Double]
+    let theoryAllCap: Int
+    let theoryUpCap: Int
     let ksAll: KSMarkerData
     let ksUp: KSMarkerData
     let limitBase: Int
     /// UP CDF 的有效采样步长 (角色=1 / 武器=10)
-    /// 武器 UP 的经验频数也聚合到十连末，与文字 KS 的统计对象一致。
-    /// 仅影响 ECDF，原始频数、平均值及 MRL 仍保留单抽粒度。
+    /// 只控制理论阶梯的画法与口径提示，Swift 不再据此聚合频数。
     var ecdfUpStepSize: Int = 1
     var upSamplesMixed: Bool = false
 
@@ -732,16 +330,6 @@ struct ECDFCanvas: View {
 
     private func draw(ctx: inout GraphicsContext, size: CGSize) {
         guard freq_all.count >= 260, freq_up.count >= 260 else { return }
-        // 与 Calculate 的武器 UP KS 一样向上取整到申领末抽。
-        // 先聚合再定量程，保证 251...259 的防御性末端也不会被丢到 260。
-        var ecdfFreqUp = freq_up
-        if ecdfUpStepSize > 1 {
-            ecdfFreqUp = [Int32](repeating: 0, count: freq_up.count)
-            for x in 1..<260 {
-                let slot = min(259, ((x + ecdfUpStepSize - 1) / ecdfUpStepSize) * ecdfUpStepSize)
-                ecdfFreqUp[slot] += freq_up[x]
-            }
-        }
         let hasData = (count_all > 0) || (count_up > 0)
         // v0.1.2.1: 无数据时不直接 return, 继续画坐标轴 + 理论 CDF,
         // 末尾叠加灰色提示. 让用户在导入 UIGF JSON 但还没出金时也能
@@ -749,7 +337,7 @@ struct ECDFCanvas: View {
 
         var maxX = limitBase
         for i in 1..<260 {
-            if (freq_all[i] > 0 || ecdfFreqUp[i] > 0) && i > maxX { maxX = i }
+            if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
         }
         maxX = ((maxX / 10) + 1) * 10
         if maxX > 259 { maxX = 259 }
@@ -815,23 +403,9 @@ struct ECDFCanvas: View {
         //   - 角色 UP   k=66~69 (软保底响应)
         //   - 角色 UP   k=120 (硬保底)
         // 武器综合 k=31 比值仅 2.86, 不触发, 保持平滑折线 (软保底渐进展开是真实形态)。
-        func drawTheoryCDF(_ cdf: [Double], stepSize: Int, color: Color) {
-            let upper = min(cdf.count - 1, maxX)
-            guard upper >= 1 else { return }
-            // v0.1.2.2: 与 Windows gui.cpp drawTheoryCDF 同款 upper_eff 截断, 截掉两类"伪末端":
-            //   1) 已饱和段: 找到第一个 cdf[k] >= 1-eps 的 k_sat, 之后所有 cdf 都等于 1.0
-            //      (硬保底之后的延伸 + char_up 122 个槽里 cdf[120]=cdf[121]=1 的哨兵区);
-            //      画到 k_sat 就停, 否则末端会冒出一段 1→1 水平虚线 (即"垂直阶梯顶端向右
-            //      拐弯"的视觉 bug).
-            //   2) 未填充哨兵段: 辉光庆典 jointPoolUP[241]=0 (cdf 数组容量 242 但只填到 240),
-            //      画上去会从 0.93 跳到 0, 产生"红色理论虚线末端笔直掉下来"的视觉 bug.
-            //      检测到 cdf[k] < cdf[k-1] (单调性破坏) 也立即停.
-            let EPS_SAT = 1e-6
-            var upperEff = upper
-            for k in 1...upper {
-                if cdf[k] >= 1.0 - EPS_SAT { upperEff = k; break }
-                if cdf[k] + EPS_SAT < cdf[k - 1] { upperEff = k - 1; break }
-            }
+        func drawTheoryCDF(_ cdf: [Double], cap: Int, stepSize: Int, color: Color) {
+            // 后端决定理论有效终点；这里仅按数组与可见横轴裁剪。
+            let upperEff = min(cap, min(cdf.count - 1, maxX))
             guard upperEff >= 1 else { return }
             var path = Path()
             path.move(to: pt(0, cdf[0]))
@@ -885,8 +459,8 @@ struct ECDFCanvas: View {
                                           lineJoin: .round,
                                           dash: [4, 3]))
         }
-        drawTheoryCDF(theoryCDF,   stepSize: 1,             color: .chartBlue)
-        drawTheoryCDF(theoryCDFUp, stepSize: ecdfUpStepSize, color: .chartRed)
+        drawTheoryCDF(theoryCDF, cap: theoryAllCap, stepSize: 1, color: .chartBlue)
+        drawTheoryCDF(theoryCDFUp, cap: theoryUpCap, stepSize: ecdfUpStepSize, color: .chartRed)
 
         // ===== 经验 ECDF =====
         // 注: 删失观测不画在 ECDF 上 —— 它还没事件化, 强行画一个标记会落在
@@ -907,7 +481,7 @@ struct ECDFCanvas: View {
                        style: StrokeStyle(lineWidth: 2.2, lineJoin: .round))
         }
         drawECDF(freq_all, total: count_all, color: .chartBlue)
-        drawECDF(ecdfFreqUp, total: count_up, color: .chartRed)
+        drawECDF(freq_up, total: count_up, color: .chartRed)
 
         // ===== KS 标记 (v0.1.2: 双色) =====
         //
@@ -917,23 +491,15 @@ struct ECDFCanvas: View {
         //   - 红色 (UP):   标签贴 KS 虚线右下方 (anchor = .topLeading)
         //   优先放在标记两侧，靠近边缘时限制在绘图区内。
         // 标签自带白色描边 (4 偏移方向), 在彩色实线上的可读性更好。
-        func drawKSMarker(_ marker: KSMarkerData, theoryCDF: [Double],
+        func drawKSMarker(_ marker: KSMarkerData, theoryCap: Int,
                           color: Color,
                           anchor: KSLabelAnchor) {
             guard marker.d > 0.01, marker.x > 0, marker.x <= maxX,
-                  theoryCDF.count >= 2 else { return }
-            let upper = min(theoryCDF.count - 1, maxX)
-            guard upper >= 1 else { return }
-            // 这里只识别理论曲线的可见末端，不重新计算 KS。
+                  theoryCap >= 1 else { return }
+            // 与理论曲线共用后端有效终点，不重新计算 KS 或截断规则。
             // 辉光池的统计核心在 240 抽后沿用 F(240)；若最大点在尾部，
             // 只显示带说明的 D，不画连接到不存在的理论曲线上的竖线。
-            let EPS_SAT = 1e-6
-            var upperEff = upper
-            for k in 1...upper {
-                if theoryCDF[k] >= 1.0 - EPS_SAT { upperEff = k; break }
-                if theoryCDF[k] + EPS_SAT < theoryCDF[k - 1] { upperEff = k - 1; break }
-            }
-            guard upperEff >= 1 else { return }
+            let upperEff = min(theoryCap, maxX)
             let outsideTheory = marker.x > upperEff
             let p1 = pt(marker.x, marker.empirical)
             let p2 = pt(marker.x, marker.theory)
@@ -978,11 +544,11 @@ struct ECDFCanvas: View {
         }
 
         // 蓝色 (综合): 左上
-        drawKSMarker(ksAll, theoryCDF: theoryCDF, color: .chartBlue,
+        drawKSMarker(ksAll, theoryCap: theoryAllCap, color: .chartBlue,
                      anchor: .leftTop)
         // 红色 (UP): 右下
         if !upSamplesMixed {
-            drawKSMarker(ksUp, theoryCDF: theoryCDFUp, color: .chartRed,
+            drawKSMarker(ksUp, theoryCap: theoryUpCap, color: .chartRed,
                          anchor: .rightBottom)
         }
 
@@ -1085,27 +651,18 @@ struct MRLCanvas: View {
 
     // v0.1.2.2 / v0.1.2.4: 加 upper_eff 截断 (避免饱和/未填段) + 长尾点质量延伸.
     //
-    //   upper_eff:  扫描 cdf 找饱和点 (>= 1-eps) 或单调性破坏点. 在那里停, 避免:
-    //     1) cdf[k]==1 后继续算无意义
-    //     2) 未填充末端 (辉光池删哨兵后 cdf[241]=0) 算 pdf=cdf[k]-cdf[k-1] 出负值
+    //   upper_eff:  直接使用后端的有效终点，与 KS 和 ECDF 理论线保持一致。
     //
     //   长尾点质量 (仅 tailMeanExcess > 0 时启用):
     //     mass = 1 - cdf[upper_eff]
     //     pos  = upper_eff + tailMeanExcess
     //     公式: num += (pos - t) × mass
     //     辉光池 MRL[0] 从 ~82 修正回完整真值 ~104.68.
-    private func computeTheoryMRL(cdf: [Double], maxX: Int,
+    private func computeTheoryMRL(cdf: [Double], lastValid: Int, maxX: Int,
                                   tailMeanExcess: Double = 0.0) -> [Double] {
         var tmrl = [Double](repeating: -1.0, count: 260)
         guard cdf.count >= 2 else { return tmrl }
-        let upper = cdf.count - 1
-        // upper_eff 截断
-        let EPS_SAT = 1e-6
-        var upperEff = upper
-        for k in 1...upper {
-            if cdf[k] >= 1.0 - EPS_SAT { upperEff = k; break }
-            if cdf[k] + EPS_SAT < cdf[k - 1] { upperEff = k - 1; break }
-        }
+        let upperEff = min(lastValid, cdf.count - 1)
         guard upperEff >= 1 else { return tmrl }
 
         let tailMass     = 1.0 - cdf[upperEff]
@@ -1150,9 +707,9 @@ struct MRLCanvas: View {
 
         let mrlAll = computeEmpiricalMRL(freq: freq_all, total: count_all, maxX: maxX)
         let mrlUp  = computeEmpiricalMRL(freq: freq_up,  total: count_up,  maxX: maxX)
-        let theoryMRL   = computeTheoryMRL(cdf: theoryCDF,   maxX: maxX)
+        let theoryMRL   = computeTheoryMRL(cdf: theoryCDF, lastValid: theoryAllCap, maxX: maxX)
         // v0.1.2.4: UP 理论 MRL 用 tailMeanExcessUp 补长尾 (仅辉光池非 0)
-        let theoryMRLUp = computeTheoryMRL(cdf: theoryCDFUp, maxX: maxX,
+        let theoryMRLUp = computeTheoryMRL(cdf: theoryCDFUp, lastValid: theoryUpCap, maxX: maxX,
                                            tailMeanExcess: tailMeanExcessUp)
 
         var maxY = 1.0

@@ -4,7 +4,7 @@
 // Calculate / ReadUigfPullList 就是 App 真正在用的那一份实现。
 //
 // 覆盖: 六张理论 CDF 的期望值、重构寻访的按系列状态、武器池按期状态 (与旧算法的逐位回归)、
-//       赠送十连分块、混合样本判定、右删失、KS 标记位置、存档读取路径。
+//       赠送十连分块、混合样本判定、右删失、图表理论/经验数据与 KS 标记、存档读取路径。
 #include "test_support.h"
 
 #include <algorithm>
@@ -90,6 +90,7 @@ int main() {
                     r.count_up, r.win_5050, r.lose_5050, int(r.ks_up_mixed));
         CHECK(r.count_up == 2);
         CHECK(!r.ks_up_mixed);                     // 跨系列不算混合
+        CHECK(r.freq_ecdf_up == r.freq_up);        // 非武器图表保留逐抽口径
         CHECK(r.win_5050 == 1 && r.lose_5050 == 0);
     }
     // 同一系列出第 2 个 UP 才是混合
@@ -99,6 +100,7 @@ int main() {
         b.push_back(RankType::Rank6, "伊冯", "绚丽异彩", 0);
         const StatsResult r = Calculate(b, false, false, stdChars, pm, true);
         CHECK(r.count_up == 2 && r.ks_up_mixed);
+        CHECK(r.freq_ecdf_up == r.freq_up);        // 导出绘图数据不能清掉混合样本标志
     }
 
     // ---------- 三、重构寻访: 多系列的删失观测都要进风险集 ----------
@@ -301,6 +303,16 @@ int main() {
         CHECK(std::abs(d - std::abs(empirical - theory)) < kKSTol);
         CHECK(std::abs(d - std::abs(location.empirical - location.theory)) < kKSTol);
     };
+    auto checkExportedLocation = [&](const StatsResult& r) {
+        const auto& location = r.ks_location_up;
+        CHECK(r.count_up > 0);
+        CHECK(location.x >= 0 && location.x < 260);
+        if (r.count_up == 0 || location.x < 0 || location.x >= 260) return;
+        int cumulative = 0;
+        for (int x = 1; x <= location.x; ++x) cumulative += r.freq_ecdf_up[x];
+        checkLocation(r.ks_d_up, location, location.x,
+                      (double)cumulative / r.count_up, r.theory_cdf_up[location.x]);
+    };
     {
         // 最小反例: 第 1 抽与第 10 抽都属于第 1 次申领, KS 应同为 1 - F(10)。
         // 第 71 抽归第 8 次申领, 最大偏差出现在此前 F(70) 的平台, D 不会被必然抬高。
@@ -316,11 +328,14 @@ int main() {
             CHECK(r.count_up == 1);
             CHECK(r.avg_up == interval);            // 平均值与 MRL 的原始频数仍保留单抽口径
             for (int x = 0; x < 260; ++x) CHECK(r.freq_up[x] == (x == interval ? 1 : 0));
+            const int claimEnd = interval == 71 ? 80 : 10;
+            for (int x = 0; x < 260; ++x) CHECK(r.freq_ecdf_up[x] == (x == claimEnd ? 1 : 0));
             CHECK(r.hazard_up[interval] == 1.0);
             const int expectedX = interval == 71 ? 70 : 10;
             const double expectedEmpirical = interval == 71 ? 0.0 : 1.0;
             checkLocation(r.ks_d_up, r.ks_location_up, expectedX,
                           expectedEmpirical, g_cdf_wep_up[expectedX]);
+            checkExportedLocation(r);
             if (interval <= 10) {
                 CHECK(std::abs(r.ks_d_up - std::pow(0.99, 10)) < kKSTol);
                 // 综合六星的 KS 继续逐抽计算, 不随武器 UP 一起聚合。
@@ -341,6 +356,48 @@ int main() {
         checkLocation(r.ks_d_all, r.ks_location_all, 20, 1.0, g_cdf_char[20]);
         checkLocation(r.ks_d_up, r.ks_location_up, 20, 1.0, g_cdf_char_up[20]);
         CHECK(r.freq_all[20] == 1 && r.freq_up[20] == 1);
+        CHECK(r.freq_ecdf_up == r.freq_up);
+        checkExportedLocation(r);
+    }
+    {
+        // 同一申领内的多个落点必须累加, 不能覆盖; 10 / 20 的整申领边界不再向后移动。
+        constexpr int intervals[]{1, 9, 10, 11, 20, 21, 71};
+        constexpr const char* pools[]{"申领A", "申领B", "申领C", "申领D", "申领E", "申领F", "申领G"};
+        std::unordered_set<std::string,StringHash,std::equal_to<>> stdWeps{"宏愿"};
+        PullBucket b(g_alloc);
+        std::array<int,260> raw{}, claims{};
+        for (int i = 0; i < 7; ++i) {
+            ++raw[intervals[i]];
+            for (int x = 1; x < intervals[i]; ++x) {
+                b.push_back(x == 40 ? RankType::Rank6 : RankType::Rank3,
+                            x == 40 ? "宏愿" : "杂鱼", pools[i], 0);
+            }
+            b.push_back(RankType::Rank6, "四二式·肃阵", pools[i], 0);
+        }
+        claims[10] = 3; claims[20] = 2; claims[30] = 1; claims[80] = 1;
+        const StatsResult r = Calculate(b, true, false, stdWeps, {});
+        CHECK(r.count_up == 7);
+        CHECK(r.freq_up == raw);
+        CHECK(r.freq_ecdf_up == claims);
+        CHECK(std::abs(r.avg_up - 143.0 / 7.0) < kKSTol);
+        checkExportedLocation(r);
+    }
+    {
+        // 异常长间隔仍需安全绘图: 251..259 向上聚合会越界, 必须全部落在 259。
+        // 250 是合法边界, 不能连同后面的频数一起移动或重复计数。
+        PullBucket b(g_alloc);
+        std::array<int,260> raw{}, claims{};
+        for (int interval = 250; interval <= 259; ++interval) {
+            for (int x = 1; x < interval; ++x) b.push_back(RankType::Rank3, "杂鱼", "异常申领", 0);
+            b.push_back(RankType::Rank6, "四二式·肃阵", "异常申领", 0);
+        }
+        for (int x = 250; x <= 259; ++x) raw[x] = 1;
+        claims[250] = 1; claims[259] = 9;
+        const StatsResult r = Calculate(b, true, false, {}, {});
+        CHECK(r.count_up == 10);
+        CHECK(r.freq_up == raw);
+        CHECK(r.freq_ecdf_up == claims);
+        checkExportedLocation(r);
     }
     {
         // 跳点前最大差应落在 x-1; 不能将该差值标到经验 CDF 已跳到 1 的 x=5 上。
@@ -382,6 +439,20 @@ int main() {
         freq[259] = 1000 - cumulative;
         const double tailD = ComputeKS(freq, 259, 1000, g_cdf_joint_up, &location);
         checkLocation(tailD, location, 259, 1.0, g_cdf_joint_up[240]);
+
+        // 真实 Calculate 也导出同一截断理论表, 保留辉光的逐抽经验频数。
+        PullBucket b(g_alloc);
+        for (int x = 1; x < 259; ++x) {
+            b.push_back(x % 80 == 0 ? RankType::Rank6 : RankType::Rank3,
+                        x % 80 == 0 ? "骏卫" : "杂鱼", "辉光庆典", 0);
+        }
+        b.push_back(RankType::Rank6, "提弗洛斯", "辉光庆典", 0);
+        const StatsResult r = Calculate(b, false, true, stdChars, {});
+        CHECK(r.count_up == 1 && r.freq_up[259] == 1);
+        CHECK(r.freq_ecdf_up == r.freq_up);
+        CHECK(!r.ks_up_mixed);
+        checkLocation(r.ks_d_up, r.ks_location_up, 240, 0.0, g_cdf_joint_up[240]);
+        checkExportedLocation(r);
     }
     {
         // 空样本必须清零输出位置, 不能遗留上次有样本的标记。
@@ -393,6 +464,68 @@ int main() {
         const StatsResult r = Calculate(b, true, false, {}, {});
         checkLocation(r.ks_d_all, r.ks_location_all, 0, 0.0, 0.0);
         checkLocation(r.ks_d_up, r.ks_location_up, 0, 0.0, 0.0);
+    }
+
+    // ---------- 十一、理论曲线与有效末端由统计核心统一导出, 空池也完整 ----------
+    std::puts("[图表理论数据]");
+    {
+        // 精确的小表钉住有效末端的语义, 不在测试里另写一遍扫描算法。
+        const std::array<double,4> saturated{0.0, 0.5, 1.0 - 0.5e-6, 1.0};
+        const std::array<double,4> sentinel{0.0, 0.5, 0.9, 0.0};
+        const std::array<double,4> roundingNoise{0.0, 0.5, 0.5 - 0.5e-6, 0.8};
+        CHECK(FindCDFLastValid(saturated) == 2);
+        CHECK(FindCDFLastValid(sentinel) == 2);
+        CHECK(FindCDFLastValid(roundingNoise) == 3);
+    }
+    {
+        // 导出缓冲区只有 260 格; 未来理论表延长时只能复制可容纳的前缀。
+        std::array<double,300> longer{};
+        for (int x = 0; x < 300; ++x) longer[x] = (double)x / 300.0;
+        std::array<double,260> exported{};
+        CHECK(FindCDFLastValid(longer) == 299);
+        CHECK(ExportTheoryCDF(longer, exported) == 259);
+        for (int x = 0; x < 260; ++x) CHECK(exported[x] == longer[x]);
+
+        // 空输入必须覆写所有旧值, 不能把上次绘图的尾部残留在结果里。
+        CHECK(ExportTheoryCDF({}, exported) == 0);
+        for (double value : exported) CHECK(value == 0.0);
+    }
+    struct TheoryCase {
+        const char* name;
+        bool isWeapon, isJoint, isRefactor;
+        std::span<const double> all, up;
+        int step;
+        double tail;
+    };
+    const TheoryCase theoryCases[]{
+        {"特许", false, false, false, g_cdf_char, g_cdf_char_up, 1, 0.0},
+        {"辉光", false, true,  false, g_cdf_char, g_cdf_joint_up, 1, g_joint_tail_mean_excess},
+        {"重构", false, false, true,  g_cdf_refactor, g_cdf_refactor_up, 1, 0.0},
+        {"武器", true,  false, false, g_cdf_wep, g_cdf_wep_up, 10, 0.0},
+    };
+    auto checkTheory = [](const std::array<double,260>& exported, int last,
+                          std::span<const double> source) {
+        CHECK(last == FindCDFLastValid(source));
+        CHECK(last > 0 && last < (int)source.size());
+        if (last <= 0 || last >= (int)source.size()) return;
+        // 理论值直接核对第一节已验证的源表; 不复制概率计算或假定末端等于硬保底。
+        for (int x = 0; x <= last; ++x) CHECK(exported[x] == source[x]);
+        for (int x = last + 1; x < 260; ++x) CHECK(exported[x] == source[last]);
+    };
+    for (const auto& tc : theoryCases) {
+        PullBucket empty(g_alloc);
+        const StatsResult r = Calculate(empty, tc.isWeapon, tc.isJoint, {}, {}, tc.isRefactor);
+        CHECK(r.count_all == 0 && r.count_up == 0);
+        CHECK(r.ecdf_up_step_size == tc.step);
+        CHECK(r.theory_tail_mean_excess_up == tc.tail);
+        CHECK(r.freq_ecdf_up == r.freq_up);
+        checkTheory(r.theory_cdf_all, r.theory_last_valid_all, tc.all);
+        checkTheory(r.theory_cdf_up, r.theory_last_valid_up, tc.up);
+        checkLocation(r.ks_d_all, r.ks_location_all, 0, 0.0, 0.0);
+        checkLocation(r.ks_d_up, r.ks_location_up, 0, 0.0, 0.0);
+        std::printf("  %s: allEnd=%d upEnd=%d step=%d tail=%.10f\n", tc.name,
+                    r.theory_last_valid_all, r.theory_last_valid_up,
+                    r.ecdf_up_step_size, r.theory_tail_mean_excess_up);
     }
 
     return tst::finish("analyzer");
