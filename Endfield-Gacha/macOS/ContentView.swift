@@ -92,16 +92,11 @@ struct ContentView: View {
                         ProgressView("分析中...")
                             .controlSize(.large)
                     } else {
-                        // 无导入数据时也显示 8 张图: 传入空的 AnalysisBundle,
+                        // 无导入数据时也显示 8 张图: 使用后端生成并缓存的空池数据,
                         // ChartGridView 内部 ECDFCanvas / MRLCanvas 在 count_all=0
                         // && count_up=0 时会画坐标轴 + 理论参考曲线 + 灰色
                         // "暂无出金数据" 提示 (v0.1.2.1 行为, 与 Windows / iOS 一致).
-                        let bundle = analysis ?? AnalysisBundle(
-                            statsChar:     ChartData(),
-                            statsJoint:    ChartData(),
-                            statsRefactor: ChartData(),
-                            statsWep:      ChartData()
-                        )
+                        let bundle = analysis ?? AnalysisBundle.placeholder
                         ChartGridView(statsChar:     bundle.statsChar,
                                       statsJoint:    bundle.statsJoint,
                                       statsRefactor: bundle.statsRefactor,

@@ -27,8 +27,7 @@ struct KSMarkerData: Sendable {
 // MARK: - Chart 数据(Swift 原生)
 //
 // Sendable: 显式声明这是线程安全的值类型, 切断 @MainActor 隔离推断的传染。
-// 字段默认值: 用 memberwise init 而非 static property, 避免静态属性被推断为
-// @MainActor 隔离 (因为 ContentView.AnalysisBundle 引用链会污染整个类型上下文)。
+// 字段默认值只供非隔离的桥接转换初始化；视图占位统一从后端取得完整理论。
 struct ChartData: Sendable {
     // v0.1.2.0: 数组从 150 扩到 260, 容纳辉光池 0..240 的 pity 范围.
     var freq_all:   [Int32]  = Array(repeating: 0,   count: 260)
@@ -67,6 +66,10 @@ struct ChartData: Sendable {
     var ks_up_mixed: Bool = false
     var censored_pity_all: Int = 0
     var censored_pity_up:  Int = 0
+
+    // 零值只供本文件的后端转换暂存，不能作为可绘制的空池。
+    // 视图的无数据状态使用 AnalysisBundle.placeholder。
+    nonisolated fileprivate init() {}
 }
 
 // MARK: - 共享:分析结果打包
@@ -81,6 +84,15 @@ struct AnalysisBundle: Sendable {
     var statsJoint:    ChartData
     var statsRefactor: ChartData
     var statsWep:      ChartData
+
+    // 首次使用时从后端初始化理论数据，随后复用不可变的值类型缓存。
+    // 不依赖导入文件或分析线程；四池均经过与真实结果相同的桥接。
+    nonisolated static let placeholder = AnalysisBundle(
+        statsChar: toChartData(GachaAnalyzerWrapper.placeholderChartData(for: .character)),
+        statsJoint: toChartData(GachaAnalyzerWrapper.placeholderChartData(for: .joint)),
+        statsRefactor: toChartData(GachaAnalyzerWrapper.placeholderChartData(for: .refactor)),
+        statsWep: toChartData(GachaAnalyzerWrapper.placeholderChartData(for: .weapon))
+    )
 }
 
 struct AnalysisBundleResult {

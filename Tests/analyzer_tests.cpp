@@ -40,6 +40,55 @@ static std::pmr::monotonic_buffer_resource g_pool;
 static std::pmr::polymorphic_allocator<std::byte> g_alloc(&g_pool);
 
 int main() {
+    // ---------- 冷启动占位: 必须放在首次显式 InitCDFTables 之前 ----------
+    // App 空状态走同一个 MakePlaceholderStats 入口, 不能依赖先分析过任何文件。
+    std::puts("[冷启动占位]");
+    struct PlaceholderCase {
+        const char* name;
+        bool isWeapon, isJoint, isRefactor;
+        int allEnd, upEnd, step;
+        std::span<const double> all, up;
+    };
+    const PlaceholderCase placeholderCases[]{
+        {"特许", false, false, false, 80, 120, 1, g_cdf_char, g_cdf_char_up},
+        {"辉光", false, true,  false, 80, 240, 1, g_cdf_char, g_cdf_joint_up},
+        {"重构", false, false, true,  80, 120, 1, g_cdf_refactor, g_cdf_refactor_up},
+        {"武器", true,  false, false, 40,  80, 10, g_cdf_wep, g_cdf_wep_up},
+    };
+    for (const auto& tc : placeholderCases) {
+        const StatsResult r = MakePlaceholderStats(tc.isWeapon, tc.isJoint, tc.isRefactor);
+        CHECK(r.count_all == 0 && r.count_up == 0);
+        CHECK(r.censored_pity_all == 0 && r.censored_pity_up == 0);
+        CHECK(r.theory_last_valid_all == tc.allEnd);
+        CHECK(r.theory_last_valid_up == tc.upEnd);
+        CHECK(r.ecdf_up_step_size == tc.step);
+        CHECK(r.theory_cdf_all[1] > 0.0);
+        CHECK(r.theory_cdf_up[tc.step] > 0.0);
+        CHECK(r.theory_cdf_up[tc.upEnd] > 0.9);
+        CHECK(std::abs(r.theory_tail_mean_excess_up -
+                       (tc.isJoint ? 84.3666393185 : 0.0)) < 1e-9);
+        CHECK(r.ks_d_all == 0.0 && r.ks_d_up == 0.0 && !r.ks_up_mixed);
+        for (int x = 0; x < 260; ++x) {
+            CHECK(r.freq_all[x] == 0 && r.freq_up[x] == 0 && r.freq_ecdf_up[x] == 0);
+            CHECK(r.hazard_all[x] == 0.0 && r.hazard_up[x] == 0.0);
+            CHECK(r.theory_cdf_all[x] == tc.all[std::min(x, tc.allEnd)]);
+            CHECK(r.theory_cdf_up[x] == tc.up[std::min(x, tc.upEnd)]);
+        }
+
+        // 重复获取仍是同一组无样本理论数据, 不会残留上次调用的状态。
+        const StatsResult again = MakePlaceholderStats(tc.isWeapon, tc.isJoint, tc.isRefactor);
+        CHECK(again.count_all == 0 && again.count_up == 0);
+        CHECK(again.freq_all == r.freq_all && again.freq_up == r.freq_up);
+        CHECK(again.freq_ecdf_up == r.freq_ecdf_up);
+        CHECK(again.theory_cdf_all == r.theory_cdf_all && again.theory_cdf_up == r.theory_cdf_up);
+        CHECK(again.theory_last_valid_all == r.theory_last_valid_all);
+        CHECK(again.theory_last_valid_up == r.theory_last_valid_up);
+        CHECK(again.ecdf_up_step_size == r.ecdf_up_step_size);
+        CHECK(again.theory_tail_mean_excess_up == r.theory_tail_mean_excess_up);
+        std::printf("  %s: allEnd=%d upEnd=%d step=%d\n", tc.name,
+                    r.theory_last_valid_all, r.theory_last_valid_up, r.ecdf_up_step_size);
+    }
+
     InitCDFTables();
 
     // ---------- 一、理论 CDF 的期望值 ----------

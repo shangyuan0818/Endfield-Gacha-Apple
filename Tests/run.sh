@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 本仓库的回归测试。可以在【没有 Xcode 的机器上】跑 —— 这正是它存在的理由:
 # 统计核心与 JSON 定位逻辑是纯 C++, 不需要 Apple SDK 就能验证。
+# macOS + Swift 6.2 环境还会验证真实 ObjC → Swift 占位桥接，其余环境明确跳过。
 #
 # 用法:
 #   Tests/run.sh            编译并运行全部测试
@@ -54,5 +55,13 @@ else
     echo "[run] 没有 swiftc, 跳过 app_config_tests (在 macOS / 装了 Swift 工具链的机器上会跑)"
 fi
 
-if [[ $rc -eq 0 ]]; then echo; echo "[run] 全部测试通过"; else echo; echo "[run] 有测试失败"; fi
+# 这一层必须编译 Foundation/ObjC，纯 C++ 抽取测试覆盖不到。
+if bash Tests/run_placeholder_bridge_tests.sh; then
+    :
+else
+    bridge_rc=$?
+    if [[ $bridge_rc -ne 77 ]]; then rc=1; fi
+fi
+
+if [[ $rc -eq 0 ]]; then echo; echo "[run] 已运行的测试全部通过（跳过项见上方输出）"; else echo; echo "[run] 有测试失败"; fi
 exit $rc

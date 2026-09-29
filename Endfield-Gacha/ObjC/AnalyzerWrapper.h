@@ -82,7 +82,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL ok;
 @end
 
+typedef NS_ENUM(NSInteger, GachaChartPool) {
+    GachaChartPoolCharacter,
+    GachaChartPoolJoint,
+    GachaChartPoolRefactor,
+    GachaChartPoolWeapon,
+};
+
 @interface GachaAnalyzerWrapper : NSObject
+// 无需导入文件即可获取完整理论曲线; 与分析入口共享线程安全的理论表初始化。
++ (GachaChartData*)placeholderChartDataForPool:(GachaChartPool)pool
+    NS_SWIFT_NAME(placeholderChartData(for:));
 + (GachaAnalysisResult*)analyzeFile:(NSString*)filePath
                               chars:(NSString*)chars
                             poolMap:(NSString*)poolMap

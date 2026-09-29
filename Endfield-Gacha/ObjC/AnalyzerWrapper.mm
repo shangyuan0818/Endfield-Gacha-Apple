@@ -1263,6 +1263,14 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
     return s;
 }
 
+// 首次打开应用时还没有分析任务, 因此占位入口必须自行确保理论表已经初始化。
+// 空桶不分配分析文件所需的 arena, 但完整复用 Calculate 的理论及绘图元数据。
+StatsResult MakePlaceholderStats(bool isWeapon, bool isJoint, bool isRefactor = false) {
+    InitCDFTables();
+    const PullBucket empty{std::pmr::polymorphic_allocator<std::byte>{}};
+    return Calculate(empty, isWeapon, isJoint, {}, {}, isRefactor);
+}
+
 // ------ 密封数据到 ObjC ------
 GachaChartData* ToChartData(const StatsResult& s) {
     GachaChartData* d = [[GachaChartData alloc] init];
@@ -1625,6 +1633,12 @@ void* analyze_worker(void* arg) {
 // GachaAnalyzerWrapper 实现 (直接调用; 调用方已在后台队列, arena 在堆上, 无需另起线程)
 // ============================================================
 @implementation GachaAnalyzerWrapper
+
++ (GachaChartData*)placeholderChartDataForPool:(GachaChartPool)pool {
+    return ToChartData(MakePlaceholderStats(pool == GachaChartPoolWeapon,
+                                           pool == GachaChartPoolJoint,
+                                           pool == GachaChartPoolRefactor));
+}
 
 + (GachaAnalysisResult*)analyzeFile:(NSString*)filePath
                               chars:(NSString*)chars

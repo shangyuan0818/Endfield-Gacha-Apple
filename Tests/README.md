@@ -1,6 +1,6 @@
 # 回归测试
 
-**不需要 Xcode。** 统计核心与 JSON 定位逻辑是纯 C++/纯 Foundation, 在任何装了
+**核心测试不需要 Xcode。** 统计核心与 JSON 定位逻辑是纯 C++/纯 Foundation, 在任何装了
 `clang++`(或 `g++`) 的机器上都能编译运行 —— 这正是这套测试存在的理由: 它覆盖的
 恰好是那些「出错了界面上没有任何提示」的地方。
 
@@ -12,6 +12,15 @@ Tests/run.sh --clean    # 先清掉 Tests/build 再跑
 有 sanitizer 就自动开 `-fsanitize=address,undefined`(扫描器全是 `string_view`
 下标运算, 越界一律当场炸); 环境缺 `libclang_rt` 会自动降级为普通构建。
 装了 Swift 工具链还会额外跑配置迁移的测试, 没有就跳过并打印一行提示。
+macOS 上还会运行真实 ObjC++ → Swift 占位桥接测试, 需要 Apple SDK 和支持
+`-default-isolation MainActor` 的 Swift 6.2+ 工具链。缺少条件时明确打印 `SKIP`,
+不会把未运行的原生测试报告成通过。也可单独运行:
+
+```sh
+bash Tests/run_placeholder_bridge_tests.sh
+```
+
+独立 runner 退出码: `0` 表示通过, `77` 表示环境不支持而跳过, 其余非零表示失败。
 
 ## 测什么
 
@@ -21,6 +30,7 @@ Tests/run.sh --clean    # 先清掉 Tests/build 再跑
 | `fetch_session_tests` | `FetchSession.mm` 的匿名 namespace | 存档定位、分页信封判读、字段读取 |
 | `analyzer_tests` | `AnalyzerWrapper.mm` 的匿名 namespace | CDF 期望值、保底/删失、图表数据与 KS 标记、存档读取、配置切分口径 |
 | `app_config_tests` | `Shared/AppConfigMigration.swift` | 配置迁移的幂等性与「不覆盖用户输入」 |
+| `placeholder_bridge_tests` (macOS) | 实际 `AnalyzerWrapper.mm` + `Shared/AnalyzerBridge.swift` | 空状态冷启动、四池理论数据、Swift 6 默认隔离与占位缓存 |
 
 几条值得单独点名的不变量:
 
@@ -40,6 +50,11 @@ Tests/run.sh --clean    # 先清掉 Tests/build 再跑
 - **图表输入由 C++ 单源提供**: 四种池在无样本时仍导出理论 CDF、有效末端、ECDF
   步长和辉光长尾常量; 理论有效前缀逐项对照已验证的源表, 之后延伸最后有效值。
   非武器 ECDF 保留原始逐抽频数, 重构混合样本标志不因导出绘图数据而改变。
+- **空状态实际桥接路径**: 原生独立进程首次直接读取 `AnalysisBundle.placeholder`,
+  不先分析文件、不手动初始化理论表、不构造替代数据。验证四池零频数及样本数、完整
+  非零理论 CDF 和有效终点、武器十连步长、辉光 MRL 长尾参数，以及修改本地副本
+  不污染后续缓存读取。用项目的 Swift 6 / `MainActor` 默认隔离设置编译, 并从
+  `nonisolated` 函数取用占位，验证后台调用路径的编译约束。
 - **`hasMore` 只按对象本层读, 绝不全文查找**: 根对象成员顺序变化不得影响判读
   (`page_root_flag_first/last.json` 是同一份数据的两种成员顺序)。
 - **配置切分口径两侧对齐**: `analyzer_tests` 第九节与 `app_config_tests` 的
@@ -65,13 +80,23 @@ Foundation, 在 Linux 上编不过。这个脚本把匿名 namespace 的**原文
 让它只依赖 Foundation, `run.sh` 可以把**它本体**和测试一起 `swiftc` 编译。
 `AppConfig.swift` 只剩 UserDefaults 读写与平台开关。
 
+## macOS 空状态手动检查
+
+桥接测试验证供图表使用的数据，不启动 SwiftUI，也不等于渲染验证。合并前可在
+macOS 上构建并启动 App，不导入任何数据，展开四种池的图表（共 8 张），确认:
+
+- 每池 ECDF 与 MRL 都显示综合和 UP 理论参考曲线、坐标轴及“暂无出金数据”提示。
+- 武器 ECDF 显示“UP 按十连申领聚合统计”提示。
+- 没有经验曲线或 KS 标记；切换到导入数据后的图表仍使用实际分析结果。
+
 ## 这套测试【不】覆盖的部分
 
 诚实地列出来, 免得绿灯被当成"可以发版"的证据:
 
-- **Swift/SwiftUI 与 Objective-C 的真实编译**。本仓库的 CI 环境没有 Xcode, 上面这些
-  程序只编译两个 `.mm` 里的纯 C++ 片段和一个纯 Foundation 的 `.swift`。
-  桥接头、`@Observable`、视图层的改动必须在 macOS 上用 Xcode 构建才算验证过。
+- **完整 App 与 SwiftUI 的真实编译/渲染**。原生桥接测试只编译实际
+  `AnalyzerWrapper.mm`、`AnalyzerWrapper.h` 与 `AnalyzerBridge.swift`。
+  Linux 或缺少 Apple SDK 的环境仍只跑纯 C++ / 可用的纯 Foundation 测试。
+  `@Observable`、其余桥接接口和视图层改动须在 macOS 上用 Xcode 构建并手动检查。
 - **网络与真实接口**。分页信封的判读是拿构造出来的 JSON 测的; 接口真实返回的形状
   变化只有联网跑一次才知道。
 - **文件落盘**(`fsync` / `F_FULLFSYNC`)、UserDefaults 的真实读写、UI 行为。
