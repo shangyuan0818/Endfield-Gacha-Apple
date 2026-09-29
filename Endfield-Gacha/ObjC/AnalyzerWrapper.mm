@@ -761,11 +761,20 @@ void InitCDFTables() {
 }
 
 // ------ KS 检验 ------
+// 与 D 一起导出实际取得最大偏差的横坐标和两条 CDF 的值, 供图表直接标注。
+struct KSLocation {
+    int x = 0;
+    double empirical = 0.0;
+    double theory = 0.0;
+};
+
 // 修复:freq 的合法索引是 [0, 259];max_pity 必须 clamp 否则越界读
-double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,std::span<const double> cdf){
+double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,std::span<const double> cdf,
+                 KSLocation* location = nullptr){
     // v0.1.3.3: "裸指针 + 长度"两个散参 → std::span (工程 C++23)。长度随表走,
-    // 调用方不可能再把表和长度传错配对; 函数体保留局部 cdf_len, 下方逻辑零改动。
+    // 调用方不可能再把表和长度传错配对; 函数体保留局部 cdf_len。
     const int cdf_len = (int)cdf.size();
+    if (location) *location = {};
     if(!n) return 0.0;
     if(max_pity > 259) max_pity = 259;        // 防御性 clamp
     // v0.1.2.2: 找到 CDF 表的"有效末端" last_valid (饱和到 1 或单调性破坏前的最后一格).
@@ -792,7 +801,14 @@ double ComputeKS(const std::array<int,260>& freq,int max_pity,int n,std::span<co
         double fa=(double)cum/n;
         double ca=lookup_cdf(x);
         double d1=std::abs(fb-cb), d2=std::abs(fa-ca);
-        if(d1>md) md=d1; if(d2>md) md=d2;
+        if(d1>md) {
+            md=d1;
+            if (location) *location = {x - 1, fb, cb};
+        }
+        if(d2>md) {
+            md=d2;
+            if (location) *location = {x, fa, ca};
+        }
     }
     return md;
 }
@@ -823,6 +839,7 @@ struct StatsResult {
     int count_all=0, count_up=0, win_5050=0, lose_5050=0;
     double avg_all=0, avg_up=0, avg_win=-1, cv_all=0, ci_all_err=0, ci_up_err=0;
     double win_rate_5050=-1, ks_d_all=0, ks_d_up=0;
+    KSLocation ks_location_all{}, ks_location_up{};
     bool ks_is_normal=true, ks_is_normal_up=true;
     // v0.1.4.0: UP 侧样本是否为"两种分布的混合", 混合时不输出拟合判定 (见 Calculate)
     bool ks_up_mixed=false;
@@ -1121,7 +1138,8 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             ? std::span<const double>(g_cdf_wep)              // 41
             : (isRefactor ? std::span<const double>(g_cdf_refactor)   // 82
                           : std::span<const double>(g_cdf_char));    // 82
-        s.ks_d_all = ComputeKS(acc.freq_all, acc.max_pity_all, acc.count_all, cdf);
+        s.ks_d_all = ComputeKS(acc.freq_all, acc.max_pity_all, acc.count_all, cdf,
+                               &s.ks_location_all);
         s.ks_is_normal = (s.ks_d_all <= 1.36/std::sqrt((double)acc.count_all));
     }
 
@@ -1179,7 +1197,8 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             // "拨内错位"系统性抬高 D (落点均匀假设下渐近 ~0.37, 12 期样本伪拒绝率 ~63%)。
             // 聚合到申领边界后, 任何拨内落点都映射到同一申领, K-S 对落点假设免疫,
             // 伪拒绝率回到 <= 名义 5% (模拟: ~2%)。
-            // 仅 K-S 内部用聚合副本; ECDF/MRL 图与 avg_up 仍为单抽粒度, 曲线连贯不变。
+            // K-S 用聚合副本, UP ECDF 图也按申领展示; 原始 freq_up、MRL 与 avg_up
+            // 仍保留单抽粒度。
             std::array<int,260> freq_up_claim{};
             for (int x = 1; x <= acc.max_pity_up; ++x) {
                 if (acc.freq_up[x] == 0) continue;
@@ -1189,9 +1208,11 @@ StatsResult Calculate(const PullBucket& bucket, bool isWeapon, bool isJoint,
             }
             int max_claim = ((acc.max_pity_up + 9) / 10) * 10;
             if (max_claim > 259) max_claim = 259;
-            s.ks_d_up = ComputeKS(freq_up_claim, max_claim, acc.count_up, cdf_up);
+            s.ks_d_up = ComputeKS(freq_up_claim, max_claim, acc.count_up, cdf_up,
+                                  &s.ks_location_up);
         } else {
-            s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up);
+            s.ks_d_up = ComputeKS(acc.freq_up, acc.max_pity_up, acc.count_up, cdf_up,
+                                  &s.ks_location_up);
         }
         s.ks_is_normal_up = (s.ks_d_up <= 1.36/std::sqrt((double)acc.count_up));
     }
@@ -1235,8 +1256,14 @@ GachaChartData* ToChartData(const StatsResult& s) {
     d.lose5050          = s.lose_5050;
     d.winRate5050       = s.win_rate_5050;
     d.ksDAll            = s.ks_d_all;
+    d.ksXAll            = s.ks_location_all.x;
+    d.ksEmpiricalAll    = s.ks_location_all.empirical;
+    d.ksTheoryAll       = s.ks_location_all.theory;
     d.ksIsNormal        = s.ks_is_normal;
     d.ksDUp             = s.ks_d_up;
+    d.ksXUp             = s.ks_location_up.x;
+    d.ksEmpiricalUp     = s.ks_location_up.empirical;
+    d.ksTheoryUp        = s.ks_location_up.theory;
     d.ksIsNormalUp      = s.ks_is_normal_up;
     d.ksUpMixed         = s.ks_up_mixed;
     d.censoredPityAll   = s.censored_pity_all;

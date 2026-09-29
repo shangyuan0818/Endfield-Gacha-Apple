@@ -4,7 +4,7 @@
 // Calculate / ReadUigfPullList 就是 App 真正在用的那一份实现。
 //
 // 覆盖: 六张理论 CDF 的期望值、重构寻访的按系列状态、武器池按期状态 (与旧算法的逐位回归)、
-//       赠送十连分块、混合样本判定、右删失、存档读取路径。
+//       赠送十连分块、混合样本判定、右删失、KS 标记位置、存档读取路径。
 #include "test_support.h"
 
 #include <algorithm>
@@ -288,6 +288,111 @@ int main() {
         CHECK(ParseCommaSeparated("  , \t ").empty());
         CHECK(ParseCommaSeparated("　宏愿").contains("　宏愿"));
         std::printf("  池映射/名单切分: %zu 条用例通过\n", size_t(20));
+    }
+
+    // ---------- 十、KS 数值与图表标记必须来自同一统计口径 ----------
+    std::puts("[KS 标记]");
+    constexpr double kKSTol = 1e-12;
+    auto checkLocation = [&](double d, const KSLocation& location,
+                             int x, double empirical, double theory) {
+        CHECK(location.x == x);
+        CHECK(std::abs(location.empirical - empirical) < kKSTol);
+        CHECK(std::abs(location.theory - theory) < kKSTol);
+        CHECK(std::abs(d - std::abs(empirical - theory)) < kKSTol);
+        CHECK(std::abs(d - std::abs(location.empirical - location.theory)) < kKSTol);
+    };
+    {
+        // 最小反例: 第 1 抽与第 10 抽都属于第 1 次申领, KS 应同为 1 - F(10)。
+        // 第 71 抽归第 8 次申领, 最大偏差出现在此前 F(70) 的平台, D 不会被必然抬高。
+        std::unordered_set<std::string,StringHash,std::equal_to<>> stdWeps{"宏愿"};
+        for (int interval : {1, 10, 71}) {
+            PullBucket b(g_alloc);
+            for (int x = 1; x <= interval; ++x) {
+                if (x == interval) b.push_back(RankType::Rank6, "四二式·肃阵", "军列申领", 0);
+                else if (x == 40) b.push_back(RankType::Rank6, "宏愿", "军列申领", 0);
+                else b.push_back(RankType::Rank3, "杂鱼", "军列申领", 0);
+            }
+            const StatsResult r = Calculate(b, true, false, stdWeps, {});
+            CHECK(r.count_up == 1);
+            CHECK(r.avg_up == interval);            // 平均值与 MRL 的原始频数仍保留单抽口径
+            for (int x = 0; x < 260; ++x) CHECK(r.freq_up[x] == (x == interval ? 1 : 0));
+            CHECK(r.hazard_up[interval] == 1.0);
+            const int expectedX = interval == 71 ? 70 : 10;
+            const double expectedEmpirical = interval == 71 ? 0.0 : 1.0;
+            checkLocation(r.ks_d_up, r.ks_location_up, expectedX,
+                          expectedEmpirical, g_cdf_wep_up[expectedX]);
+            if (interval <= 10) {
+                CHECK(std::abs(r.ks_d_up - std::pow(0.99, 10)) < kKSTol);
+                // 综合六星的 KS 继续逐抽计算, 不随武器 UP 一起聚合。
+                checkLocation(r.ks_d_all, r.ks_location_all, interval,
+                              1.0, g_cdf_wep[interval]);
+            }
+            std::printf("  武器 UP [%d]: D=%.12f x=%d empirical=%.12f theory=%.12f\n",
+                        interval, r.ks_d_up, r.ks_location_up.x,
+                        r.ks_location_up.empirical, r.ks_location_up.theory);
+        }
+    }
+    {
+        // 普通角色池: 单抽口径不变, all / UP 都要导出对应理论表上的同一位置。
+        PullBucket b(g_alloc);
+        for (int x = 1; x < 20; ++x) b.push_back(RankType::Rank3, "杂鱼", "冬猎", 0);
+        b.push_back(RankType::Rank6, "提弗洛斯", "冬猎", 0);
+        const StatsResult r = Calculate(b, false, false, stdChars, pm);
+        checkLocation(r.ks_d_all, r.ks_location_all, 20, 1.0, g_cdf_char[20]);
+        checkLocation(r.ks_d_up, r.ks_location_up, 20, 1.0, g_cdf_char_up[20]);
+        CHECK(r.freq_all[20] == 1 && r.freq_up[20] == 1);
+    }
+    {
+        // 跳点前最大差应落在 x-1; 不能将该差值标到经验 CDF 已跳到 1 的 x=5 上。
+        std::array<int,260> freq{};
+        freq[5] = 1;
+        const std::array<double,6> cdf{0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
+        KSLocation location;
+        const double d = ComputeKS(freq, 5, 1, cdf, &location);
+        checkLocation(d, location, 4, 0.0, 0.8);
+        CHECK(d == ComputeKS(freq, 5, 1, cdf));      // 旧的四参数调用仍兼容
+
+        // 唯一可由首次跳前比较取得的新极值在 x=0, 也要保留真实横坐标。
+        freq = {};
+        freq[1] = 1;
+        const std::array<double,2> startsAboveZero{0.4, 0.7};
+        const double atZero = ComputeKS(freq, 1, 1, startsAboveZero, &location);
+        checkLocation(atZero, location, 0, 0.0, 0.4);
+    }
+    {
+        // 辉光 UP 表在 240 后是未填充哨兵段; 比较范围和标记都沿用有效尾值。
+        std::array<int,260> freq{};
+        freq[259] = 1;
+        KSLocation location;
+        CHECK(g_cdf_joint_up[240] > 0.5 && g_cdf_joint_up[240] < 1.0);
+        CHECK(g_cdf_joint_up[241] == 0.0);
+        const double d = ComputeKS(freq, 999, 1, g_cdf_joint_up, &location);
+        checkLocation(d, location, 240, 0.0, g_cdf_joint_up[240]);
+        CHECK(d < 1.0);                           // 不把哨兵 0 当成真正的理论 CDF
+
+        // 近似理论分布后, 将剩余长尾放在 259: 最大差真正落在绘图范围外,
+        // 导出位置必须保留 259, 不能为了显示而截成 240。
+        freq = {};
+        int cumulative = 0;
+        for (int x = 1; x <= 240; ++x) {
+            const int next = (int)std::floor(1000.0 * g_cdf_joint_up[x]);
+            freq[x] = next - cumulative;
+            cumulative = next;
+        }
+        freq[259] = 1000 - cumulative;
+        const double tailD = ComputeKS(freq, 259, 1000, g_cdf_joint_up, &location);
+        checkLocation(tailD, location, 259, 1.0, g_cdf_joint_up[240]);
+    }
+    {
+        // 空样本必须清零输出位置, 不能遗留上次有样本的标记。
+        std::array<int,260> freq{};
+        KSLocation location{70, 0.5, 0.75};
+        const double d = ComputeKS(freq, 0, 0, g_cdf_wep_up, &location);
+        checkLocation(d, location, 0, 0.0, 0.0);
+        PullBucket b(g_alloc);
+        const StatsResult r = Calculate(b, true, false, {}, {});
+        checkLocation(r.ks_d_all, r.ks_location_all, 0, 0.0, 0.0);
+        checkLocation(r.ks_d_up, r.ks_location_up, 0, 0.0, 0.0);
     }
 
     return tst::finish("analyzer");

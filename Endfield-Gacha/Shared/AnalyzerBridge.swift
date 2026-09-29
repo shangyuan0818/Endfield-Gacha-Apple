@@ -16,6 +16,14 @@
 
 import Foundation
 
+// 由统计核心同时计算 D 和最大偏差位置，图表不再用另一套口径重算。
+struct KSMarkerData: Sendable {
+    var d: Double = 0
+    var x: Int = 0
+    var empirical: Double = 0
+    var theory: Double = 0
+}
+
 // MARK: - Chart 数据(Swift 原生)
 //
 // Sendable: 显式声明这是线程安全的值类型, 切断 @MainActor 隔离推断的传染。
@@ -42,6 +50,8 @@ struct ChartData: Sendable {
     var ks_is_normal:  Bool = true
     var ks_d_up:    Double = 0
     var ks_is_normal_up: Bool = true
+    var ks_marker_all = KSMarkerData()
+    var ks_marker_up = KSMarkerData()
     // v0.1.4.0: UP 侧样本是否为"两种分布的混合"。只有重构寻访会出现 ——
     // 理论曲线描述的是【系列内第一个 UP】(带 120 抽兜底), 而经验样本记的是每两个 UP
     // 之间的间隔, 第 2 个及以后的 UP 没有兜底。两者不是同一个统计对象, 混合时不判定。
@@ -112,6 +122,10 @@ nonisolated private func toChartData(_ d: GachaChartData) -> ChartData {
     c.ks_is_normal      = d.ksIsNormal
     c.ks_d_up           = d.ksDUp
     c.ks_is_normal_up   = d.ksIsNormalUp
+    c.ks_marker_all = KSMarkerData(d: d.ksDAll, x: d.ksXAll,
+                                  empirical: d.ksEmpiricalAll, theory: d.ksTheoryAll)
+    c.ks_marker_up = KSMarkerData(d: d.ksDUp, x: d.ksXUp,
+                                 empirical: d.ksEmpiricalUp, theory: d.ksTheoryUp)
     c.ks_up_mixed       = d.ksUpMixed
     c.censored_pity_all = d.censoredPityAll
     c.censored_pity_up  = d.censoredPityUp

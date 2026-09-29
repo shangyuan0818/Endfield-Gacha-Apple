@@ -26,8 +26,15 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) NSInteger lose5050;
 @property (nonatomic) double winRate5050;
 @property (nonatomic) double ksDAll;
+// 最大偏差处的坐标及两条 CDF 的值, 与 ksDAll / ksDUp 使用相同统计口径。
+@property (nonatomic) NSInteger ksXAll;
+@property (nonatomic) double ksEmpiricalAll;
+@property (nonatomic) double ksTheoryAll;
 @property (nonatomic) BOOL ksIsNormal;
 @property (nonatomic) double ksDUp;
+@property (nonatomic) NSInteger ksXUp;
+@property (nonatomic) double ksEmpiricalUp;
+@property (nonatomic) double ksTheoryUp;
 @property (nonatomic) BOOL ksIsNormalUp;
 // v0.1.4.0: UP 侧样本是否为"两种分布的混合"。重构寻访的理论 UP 曲线描述的是
 // 【系列内第一个 UP】(带 120 抽兜底), 而经验 freq_up 记的是每两个 UP 之间的间隔 ——

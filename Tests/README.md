@@ -19,7 +19,7 @@ Tests/run.sh --clean    # 先清掉 Tests/build 再跑
 |---|---|---|
 | `json_scan_tests` | `Endfield-Gacha/ObjC/JsonScan.h` | 扫描器的严格性边界 |
 | `fetch_session_tests` | `FetchSession.mm` 的匿名 namespace | 存档定位、分页信封判读、字段读取 |
-| `analyzer_tests` | `AnalyzerWrapper.mm` 的匿名 namespace | CDF 期望值、保底/删失、存档读取、配置切分口径 |
+| `analyzer_tests` | `AnalyzerWrapper.mm` 的匿名 namespace | CDF 期望值、保底/删失、KS 标记位置、存档读取、配置切分口径 |
 | `app_config_tests` | `Shared/AppConfigMigration.swift` | 配置迁移的幂等性与「不覆盖用户输入」 |
 
 几条值得单独点名的不变量:
@@ -33,6 +33,9 @@ Tests/run.sh --clean    # 先清掉 Tests/build 再跑
   libm 的 `std::pow` 可能相差 1 ulp。
 - **武器池顺序数据与旧算法逐位一致**: 测试里现写了一份旧算法当参照物, 两边
   `freq_all[0..259]` 全等。按池分状态这次改动的前提就是"只修交错, 不动单池行为"。
+- **KS 标记与文字 D 同源**: 武器 UP 的 `[1]` / `[10]` / `[71]` 通过真实 `Calculate`
+  验证申领口径、最大偏差位置和两条 CDF 的纵坐标, 同时钉住原始单抽频数不变。
+  另覆盖普通角色池、跳点前位置、空样本清零及辉光 UP 的截断尾部。
 - **`hasMore` 只按对象本层读, 绝不全文查找**: 根对象成员顺序变化不得影响判读
   (`page_root_flag_first/last.json` 是同一份数据的两种成员顺序)。
 - **配置切分口径两侧对齐**: `analyzer_tests` 第九节与 `app_config_tests` 的

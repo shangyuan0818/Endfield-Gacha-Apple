@@ -550,6 +550,7 @@ struct ChartGridView: View {
                    censored_up:  statsChar.censored_pity_up,
                    theoryCDF: TheoryCDF.charPool,
                    theoryCDFUp: TheoryCDF.charPoolUP,
+                   ksAll: statsChar.ks_marker_all, ksUp: statsChar.ks_marker_up,
                    limitBase: 120,
                    ecdfUpStepSize: 1)
     }
@@ -574,6 +575,7 @@ struct ChartGridView: View {
                    censored_up:  statsJoint.censored_pity_up,
                    theoryCDF: TheoryCDF.charPool,
                    theoryCDFUp: TheoryCDF.jointPoolUP,
+                   ksAll: statsJoint.ks_marker_all, ksUp: statsJoint.ks_marker_up,
                    limitBase: 240,
                    ecdfUpStepSize: 1)
     }
@@ -600,8 +602,10 @@ struct ChartGridView: View {
                    censored_up:  statsRefactor.censored_pity_up,
                    theoryCDF: TheoryCDF.refactorPool,
                    theoryCDFUp: TheoryCDF.refactorPoolUP,
+                   ksAll: statsRefactor.ks_marker_all, ksUp: statsRefactor.ks_marker_up,
                    limitBase: 120,
-                   ecdfUpStepSize: 1)
+                   ecdfUpStepSize: 1,
+                   upSamplesMixed: statsRefactor.ks_up_mixed)
     }
     private var refactorMRL: some View {
         MRLCanvas(title: "角色 (重构寻访) 剩余抽数期望 (MRL)",
@@ -622,6 +626,7 @@ struct ChartGridView: View {
                    censored_up:  statsWep.censored_pity_up,
                    theoryCDF: TheoryCDF.wepPool,
                    theoryCDFUp: TheoryCDF.wepPoolUP,
+                   ksAll: statsWep.ks_marker_all, ksUp: statsWep.ks_marker_up,
                    limitBase: 80,
                    ecdfUpStepSize: 10)
     }
@@ -659,16 +664,24 @@ struct ECDFCanvas: View {
     let censored_up:  Int
     let theoryCDF: [Double]
     let theoryCDFUp: [Double]
+    let ksAll: KSMarkerData
+    let ksUp: KSMarkerData
     let limitBase: Int
     /// UP CDF 的有效采样步长 (角色=1 / 武器=10)
-    /// 影响 ECDF 理论虚线的画法: 角色折线连相邻整数点, 武器画真实阶梯。
+    /// 武器 UP 的经验频数也聚合到十连末，与文字 KS 的统计对象一致。
+    /// 仅影响 ECDF，原始频数、平均值及 MRL 仍保留单抽粒度。
     var ecdfUpStepSize: Int = 1
+    var upSamplesMixed: Bool = false
 
     @Environment(\.horizontalSizeClass) private var hSize
 
     var body: some View {
         let compact = (hSize == .compact)
-        let topInset: CGFloat = compact ? 52 : 32
+        let upNote: String? = upSamplesMixed
+            ? "UP 样本混合，不作 KS 判定\n理论仅适用于系列内首个 UP"
+            : (ecdfUpStepSize > 1 ? "UP 按十连申领聚合统计" : nil)
+        let noteHeight: CGFloat = upSamplesMixed ? 30 : (upNote == nil ? 0 : 18)
+        let topInset: CGFloat = (compact ? 52 : 32) + noteHeight
 
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 8).fill(.background)
@@ -700,6 +713,14 @@ struct ECDFCanvas: View {
                 .padding(.top, 11).padding(.trailing, 14)
                 .frame(maxWidth: .infinity, alignment: .trailing)
             }
+            if let upNote {
+                Text(upNote)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, compact ? 50 : 32)
+                    .padding(.horizontal, 14)
+            }
         }
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
     }
@@ -711,6 +732,16 @@ struct ECDFCanvas: View {
 
     private func draw(ctx: inout GraphicsContext, size: CGSize) {
         guard freq_all.count >= 260, freq_up.count >= 260 else { return }
+        // 与 Calculate 的武器 UP KS 一样向上取整到申领末抽。
+        // 先聚合再定量程，保证 251...259 的防御性末端也不会被丢到 260。
+        var ecdfFreqUp = freq_up
+        if ecdfUpStepSize > 1 {
+            ecdfFreqUp = [Int32](repeating: 0, count: freq_up.count)
+            for x in 1..<260 {
+                let slot = min(259, ((x + ecdfUpStepSize - 1) / ecdfUpStepSize) * ecdfUpStepSize)
+                ecdfFreqUp[slot] += freq_up[x]
+            }
+        }
         let hasData = (count_all > 0) || (count_up > 0)
         // v0.1.2.1: 无数据时不直接 return, 继续画坐标轴 + 理论 CDF,
         // 末尾叠加灰色提示. 让用户在导入 UIGF JSON 但还没出金时也能
@@ -718,7 +749,7 @@ struct ECDFCanvas: View {
 
         var maxX = limitBase
         for i in 1..<260 {
-            if (freq_all[i] > 0 || freq_up[i] > 0) && i > maxX { maxX = i }
+            if (freq_all[i] > 0 || ecdfFreqUp[i] > 0) && i > maxX { maxX = i }
         }
         maxX = ((maxX / 10) + 1) * 10
         if maxX > 259 { maxX = 259 }
@@ -876,7 +907,7 @@ struct ECDFCanvas: View {
                        style: StrokeStyle(lineWidth: 2.2, lineJoin: .round))
         }
         drawECDF(freq_all, total: count_all, color: .chartBlue)
-        drawECDF(freq_up,  total: count_up,  color: .chartRed)
+        drawECDF(ecdfFreqUp, total: count_up, color: .chartRed)
 
         // ===== KS 标记 (v0.1.2: 双色) =====
         //
@@ -884,18 +915,18 @@ struct ECDFCanvas: View {
         // 标签布局策略:
         //   - 蓝色 (综合): 标签贴 KS 虚线左上方 (anchor = .bottomTrailing)
         //   - 红色 (UP):   标签贴 KS 虚线右下方 (anchor = .topLeading)
-        //   两个标签天然不会撞, 颜色与对应 ECDF 实线一致。
+        //   优先放在标记两侧，靠近边缘时限制在绘图区内。
         // 标签自带白色描边 (4 偏移方向), 在彩色实线上的可读性更好。
-        func drawKSMarker(freq: [Int32], total: Int,
-                          theoryCDF: [Double],
+        func drawKSMarker(_ marker: KSMarkerData, theoryCDF: [Double],
                           color: Color,
                           anchor: KSLabelAnchor) {
-            guard total > 0, theoryCDF.count >= 2 else { return }
+            guard marker.d > 0.01, marker.x > 0, marker.x <= maxX,
+                  theoryCDF.count >= 2 else { return }
             let upper = min(theoryCDF.count - 1, maxX)
             guard upper >= 1 else { return }
-            // v0.1.2.2: 同 drawTheoryCDF, 加 upper_eff 截断避免:
-            //   - 辉光池 theoryCDF[241]=0 让 |cum - 0| ≈ 1, 误判为最大偏离点
-            //   - 饱和段 (cdf[k]==1 after hard pity) 上做无意义的比较
+            // 这里只识别理论曲线的可见末端，不重新计算 KS。
+            // 辉光池的统计核心在 240 抽后沿用 F(240)；若最大点在尾部，
+            // 只显示带说明的 D，不画连接到不存在的理论曲线上的竖线。
             let EPS_SAT = 1e-6
             var upperEff = upper
             for k in 1...upper {
@@ -903,42 +934,34 @@ struct ECDFCanvas: View {
                 if theoryCDF[k] + EPS_SAT < theoryCDF[k - 1] { upperEff = k - 1; break }
             }
             guard upperEff >= 1 else { return }
-            var maxD = 0.0
-            var maxDx = 0
-            var cum = 0.0
-            for k in 1...upperEff {
-                cum += Double(freq[k]) / Double(total)
-                let d = abs(cum - theoryCDF[k])
-                if d > maxD { maxD = d; maxDx = k }
+            let outsideTheory = marker.x > upperEff
+            let p1 = pt(marker.x, marker.empirical)
+            let p2 = pt(marker.x, marker.theory)
+            if !outsideTheory {
+                var ksPath = Path()
+                ksPath.move(to: p1); ksPath.addLine(to: p2)
+                ctx.stroke(ksPath, with: .color(color),
+                           style: StrokeStyle(lineWidth: 1.2, dash: [2, 2]))
             }
-            guard maxD > 0.01, maxDx > 0 else { return }
-            var emp_y: Double = 0
-            for k in 1...maxDx { emp_y += Double(freq[k]) / Double(total) }
-            let th_y = theoryCDF[maxDx]
-            let p1 = pt(maxDx, emp_y)
-            let p2 = pt(maxDx, th_y)
-            // KS 虚线 (与对应 ECDF 实线同色)
-            var ksPath = Path()
-            ksPath.move(to: p1); ksPath.addLine(to: p2)
-            ctx.stroke(ksPath, with: .color(color),
-                       style: StrokeStyle(lineWidth: 1.2, dash: [2, 2]))
 
             // 标签位置和锚点
-            let lbl = Text(String(format: "KS D=%.3f", maxD))
+            let suffix = outsideTheory ? " (尾部截断参考)" : ""
+            let lbl = Text(String(format: "KS D=%.3f", marker.d) + suffix)
                 .font(.system(size: 10).weight(.medium))
-            let midY = (p1.y + p2.y) / 2
-            let labelPos: CGPoint
-            let unitAnchor: UnitPoint
+            let labelSize = ctx.resolve(lbl).measure(in: size)
+            let midY = outsideTheory ? p1.y : (p1.y + p2.y) / 2
+            let desiredPos: CGPoint
             switch anchor {
             case .leftTop:
-                // 标签右下角对齐到虚线左侧偏上处 (整体在虚线左上方)
-                labelPos = CGPoint(x: p1.x - 4, y: midY - 2)
-                unitAnchor = .bottomTrailing
+                desiredPos = CGPoint(x: p1.x - 4 - labelSize.width,
+                                     y: midY - 2 - labelSize.height)
             case .rightBottom:
-                // 标签左上角对齐到虚线右侧偏下处 (整体在虚线右下方)
-                labelPos = CGPoint(x: p1.x + 4, y: midY + 2)
-                unitAnchor = .topLeading
+                desiredPos = CGPoint(x: p1.x + 4, y: midY + 2)
             }
+            // 最大点可能位于首抽或量程末端，完整标签仍须留在绘图区内。
+            let labelPos = CGPoint(
+                x: max(plotX, min(plotX + plotW - labelSize.width, desiredPos.x)),
+                y: max(plotY, min(plotY + plotH - labelSize.height, desiredPos.y)))
 
             // 白色描边
             let outline = lbl.foregroundStyle(Color.chartBackground)
@@ -946,22 +969,22 @@ struct ECDFCanvas: View {
                 for dy: CGFloat in [-1, 1] {
                     drawText(&ctx, outline,
                              at: CGPoint(x: labelPos.x + dx, y: labelPos.y + dy),
-                             anchor: unitAnchor)
+                             anchor: .topLeading)
                 }
             }
             // 主文本
             let main = lbl.foregroundStyle(color)
-            drawText(&ctx, main, at: labelPos, anchor: unitAnchor)
+            drawText(&ctx, main, at: labelPos, anchor: .topLeading)
         }
 
         // 蓝色 (综合): 左上
-        drawKSMarker(freq: freq_all, total: count_all,
-                     theoryCDF: theoryCDF, color: .chartBlue,
+        drawKSMarker(ksAll, theoryCDF: theoryCDF, color: .chartBlue,
                      anchor: .leftTop)
         // 红色 (UP): 右下
-        drawKSMarker(freq: freq_up, total: count_up,
-                     theoryCDF: theoryCDFUp, color: .chartRed,
-                     anchor: .rightBottom)
+        if !upSamplesMixed {
+            drawKSMarker(ksUp, theoryCDF: theoryCDFUp, color: .chartRed,
+                         anchor: .rightBottom)
+        }
 
         // v0.1.2.1: 无出金数据时, 在图中央叠加灰色提示文字 (理论曲线仍可见)
         if !hasData {
