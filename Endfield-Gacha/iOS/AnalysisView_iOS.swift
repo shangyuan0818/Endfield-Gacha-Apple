@@ -53,9 +53,9 @@ struct AnalysisView_iOS: View {
                         SummaryCardsView(charts: a)
                             .padding(.horizontal)
 
-                        // 折叠详细统计: 三个卡池卡片 (特许 / 辉光 / 武器),
+                        // 折叠详细统计: 四个卡池卡片 (特许 / 辉光 / 重构 / 武器),
                         // iOS 上结构化排版替代原 PC 风格的等宽对齐文本。
-                        // v0.1.2.0: 加辉光庆典卡片.
+                        // v0.1.2.0: 加辉光庆典卡片. v0.1.4.0: 加重构寻访卡片.
                         DisclosureGroup(isExpanded: $showRawText) {
                             VStack(spacing: 12) {
                                 PoolDetailCard(
@@ -67,6 +67,11 @@ struct AnalysisView_iOS: View {
                                     poolName: "角色卡池 (辉光庆典)",
                                     stats: a.statsJoint,
                                     kind: .joint
+                                )
+                                PoolDetailCard(
+                                    poolName: "角色卡池 (重构寻访)",
+                                    stats: a.statsRefactor,
+                                    kind: .refactor
                                 )
                                 PoolDetailCard(
                                     poolName: "武器卡池 (武库申领)",
@@ -82,14 +87,15 @@ struct AnalysisView_iOS: View {
                         .padding(.horizontal)
                         .padding(.vertical, 4)
 
-                        // 6 张图布局 (v0.1.2.0, 从 4 张扩到 6 张):
-                        //   iPad (regular): 2x3 网格 (3 行 × 2 列, 每行一个池)
-                        //   iPhone (compact): 纵向堆叠 6 张
+                        // 8 张图布局 (v0.1.2.0 从 4 张扩到 6 张; v0.1.4.0 再扩到 8 张):
+                        //   iPad (regular): 2 列 × 4 行 (每行一个池)
+                        //   iPhone (compact): 纵向堆叠 8 张
                         let layout: ChartGridLayout =
                             (hSize == .regular) ? .grid2x2Fixed : .vertical
-                        ChartGridView(statsChar:  a.statsChar,
-                                      statsJoint: a.statsJoint,
-                                      statsWep:   a.statsWep,
+                        ChartGridView(statsChar:     a.statsChar,
+                                      statsJoint:    a.statsJoint,
+                                      statsRefactor: a.statsRefactor,
+                                      statsWep:      a.statsWep,
                                       layout: layout)
                             .padding(.horizontal)
                     } else {
@@ -159,6 +165,7 @@ struct AnalysisView_iOS: View {
         analysis = nil
         outputText = "正在分析 \(url.lastPathComponent)..."
 
+        // 三份配置都按原值传给分析器; 名单被清空就按空名单算 (见 AppConfig)
         let chars = config.chars
         let pool  = config.pool
         let weps  = config.weps
@@ -226,7 +233,8 @@ private struct SummaryCardsView: View {
     var body: some View {
         // 用 Grid 而非 LazyVGrid:
         //   v0.1.2.0: 从 2x2 扩到 3x2, 加辉光庆典池摘要行.
-        //   只有 6 张卡片, lazy 加载没有意义。LazyVGrid 在 ScrollView 中
+        //   v0.1.4.0: 再扩到 4x2, 加重构寻访池摘要行.
+        //   只有 8 张卡片, lazy 加载没有意义。LazyVGrid 在 ScrollView 中
         //   遇到快速滚动/切 Tab 时, 某些 cell 会出现"内容为空但占位还在"的渲染 bug,
         //   尤其是 cell 用了 .regularMaterial 这种需要离屏采样的复杂背景。
         //   Grid 一次性渲染全部 cell,没有卸载/加载的状态切换,从源头消除该 bug。
@@ -262,14 +270,30 @@ private struct SummaryCardsView: View {
                 )
             }
             GridRow {
-                // 5. 武器总样本
+                // 5. 重构寻访池总样本 (v0.1.4.0)
+                StatCard(
+                    title: "重构 · 总样本",
+                    value: "\(charts.statsRefactor.count_all)",
+                    subtitle: String(format: "平均 %.2f 抽 / 6★",
+                                     charts.statsRefactor.avg_all)
+                )
+                // 6. 重构寻访池不歪率 (机制与特许寻访同构: 每个 6 星独立 50/50,
+                //    120 抽硬保底强制出的那发已在 C++ 端从 win/lose 里剔除)
+                StatCard(
+                    title: "重构 · 不歪率",
+                    value: rateString(charts.statsRefactor.win_rate_5050),
+                    subtitle: "\(charts.statsRefactor.win_5050) 中 / \(charts.statsRefactor.win_5050 + charts.statsRefactor.lose_5050) 总"
+                )
+            }
+            GridRow {
+                // 7. 武器总样本
                 StatCard(
                     title: "武器 · 总样本",
                     value: "\(charts.statsWep.count_all)",
                     subtitle: String(format: "平均 %.2f 抽 / 6★",
                                      charts.statsWep.avg_all)
                 )
-                // 6. 特许角色 UP K-S 正态性 (v0.1.1 起改用 UP):
+                // 8. 特许角色 UP K-S 正态性 (v0.1.1 起改用 UP):
                 //    UP 涉及 50% 歪率 + 各自硬保底, 比综合六星更复杂,
                 //    KS 偏离度更能反映"运气是否反常"。
                 //    综合六星机制本身简单(纯 hazard 函数), 偏离度本身信息量较少。
@@ -375,6 +399,7 @@ private struct PoolDetailCard: View {
     enum Kind {
         case character  // 特许寻访: 显示"真实不歪率"
         case joint      // 辉光庆典: 显示"非常驻六星率" (v0.1.2.0)
+        case refactor   // 重构寻访: 与特许寻访同构, 显示"真实不歪率" (v0.1.4.0)
         case weapon     // 武库申领: 显示"6 星中 UP 率"
     }
 
@@ -388,6 +413,7 @@ private struct PoolDetailCard: View {
         switch kind {
         case .character: return 51.81
         case .joint:     return 51.81   // 辉光池综合 6 星与特许寻访同分布
+        case .refactor:  return 51.37   // 多出两次赠送十连 (累计 60/90 抽), 略低于特许
         case .weapon:    return 19.17
         }
     }
@@ -395,13 +421,16 @@ private struct PoolDetailCard: View {
         switch kind {
         case .character: return 79.29
         case .joint:     return 104.68  // 辉光池首限定完整理论期望 (含长尾修正; 朴素 E[首6星]/0.5=103.62 偏低)
+        case .refactor:  return 77.83   // 系列内首个 UP (含 120 抽兜底)
         case .weapon:    return 54.74
         }
     }
     private var theoryUpRate: Double {
         switch kind {
-        case .character, .joint: return 0.50
-        case .weapon:            return 0.25
+        // 重构寻访的 UP 占比【官方未公布】, 暂沿用特许寻访的 50% —— 依据是两池其余
+        // 参数逐字段相同。待开池后用游戏内概率公示页核对。
+        case .character, .joint, .refactor: return 0.50
+        case .weapon:                       return 0.25
         }
     }
 
@@ -464,38 +493,51 @@ private struct PoolDetailCard: View {
             // 抽到 UP / 限定 平均: 同上, count_up=0 时 avg_up 未定义.
             // 辉光池没有"当期 UP"概念 (4 个 6 星里 2 限定 2 常驻),
             // 文案改成"抽到限定(非常驻)均值"语义更准确.
+            // v0.1.4.2: ks_up_mixed 时连这一行的对照基准也不成立 —— 理论 77.83 是
+            //   refactorPoolUP 算出的 E[系列内第一个 UP], 前提正是"120 兜底未用掉";
+            //   样本一旦混进第 2 个 UP, 拿它当基准就是在跟一个刚被判定为不适用的模型比。
+            //   旧写法只降级了下面的 K-S 行, 这一行照旧打印理论值, 同一张卡片自相矛盾。
             DetailRow(
                 label: kind == .joint ? "抽到限定(非常驻)均值" : "抽到 UP 综合均值",
                 value: stats.count_up > 0
                     ? String(format: "%.2f 抽", stats.avg_up)
                     : "—",
-                hint: stats.count_up > 0
-                    ? String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
-                             theoryAvgUp,
-                             max(0, stats.avg_up - stats.ci_up_err),
-                             stats.avg_up + stats.ci_up_err)
-                    : String(format: "理论 %.2f", theoryAvgUp)
+                hint: stats.ks_up_mixed
+                    ? String(format: "理论 %.2f 仅适用于系列内首个 UP · 本样本混合, 不作对照", theoryAvgUp)
+                    : (stats.count_up > 0
+                        ? String(format: "理论 %.2f · 95%% CI [%.1f, %.1f]",
+                                 theoryAvgUp,
+                                 max(0, stats.avg_up - stats.ci_up_err),
+                                 stats.avg_up + stats.ci_up_err)
+                        : String(format: "理论 %.2f", theoryAvgUp))
             )
 
             // K-S 检验 (UP / 限定 六星): 与综合六星 KS 行紧邻,
             // 用户能直接对比"机制大盘 vs 当期"是否各自符合理论模型.
             // count_up=0 时 ks_d_up 未定义, 同样用占位.
+            // ks_up_mixed (仅重构寻访会出现): 理论曲线描述的是【系列内第一个 UP】
+            // (带 120 抽兜底), 而经验样本记的是每两个 UP 之间的间隔 —— 第 2 个及以后
+            // 的 UP 没有这个兜底。两者不是同一个统计对象, 一旦样本里出现第 2 个 UP,
+            // 整体就是混合分布, 不再作"符合/偏离"判定 (D 值仍照常显示供参考)。
             DetailRow(
                 label: kind == .joint ? "限定六星 K-S 偏离度" : "UP 六星 K-S 偏离度",
                 value: stats.count_up > 0
                     ? String(format: "D = %.3f", stats.ks_d_up)
                     : "—",
                 hint: stats.count_up > 0
-                    ? (stats.ks_is_normal_up ? "符合理论模型" : "偏离理论模型")
+                    ? (stats.ks_up_mixed ? "样本混合, 不判定"
+                                         : (stats.ks_is_normal_up ? "符合理论模型" : "偏离理论模型"))
                     : "样本不足, 无法判断",
-                valueTint: stats.count_up > 0
-                    ? (stats.ks_is_normal_up ? .primary : .orange)
+                valueTint: (stats.count_up > 0 && !stats.ks_up_mixed && !stats.ks_is_normal_up)
+                    ? .orange
                     : .primary
             )
 
             // 不歪率(角色 特许) / 非常驻率(辉光) / 6 星 UP 率(武器)
             switch kind {
-            case .character:
+            case .character, .refactor:
+                // 重构寻访与特许寻访同构: 每个 6 星独立 50/50, 硬保底强制出的那发已在
+                // C++ 端从 win/lose 里剔除 (重构的硬保底作用域是"同名系列一生一次")。
                 // 无样本时 win_rate_5050 / avg_win 在 C++ 端为 sentinel -1,
                 // 显示占位符 "—" 而非负数, 保持检测项完整可见.
                 DetailRow(
@@ -503,7 +545,7 @@ private struct PoolDetailCard: View {
                     value: stats.win_rate_5050 >= 0
                         ? String(format: "%.1f%%", stats.win_rate_5050 * 100)
                         : "—",
-                    hint: "理论 \(Int(theoryUpRate * 100))% · \(stats.win_5050) 胜 \(stats.lose_5050) 负"
+                    hint: "理论 \(Int(theoryUpRate * 100))%\(kind == .refactor ? "(官方未公布, 暂沿用特许)" : "") · \(stats.win_5050) 胜 \(stats.lose_5050) 负"
                 )
                 DetailRow(
                     label: "赢下小保底均值",

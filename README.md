@@ -23,6 +23,25 @@ Gacha tracker and visualizer for Arknights: Endfield on macOS &amp; iOS. Built w
    
    拖拽UIGF文件到窗口。
 
+> [!IMPORTANT]
+> The in-game headhunting record only covers **the last 90 days**. Records older than that are dropped
+> by the official API and can never be fetched again. Each fetch merges incrementally into the UIGF file
+> you supply as the baseline, so fetch regularly and keep that file — it is the only long-term archive
+> of your pulls.
+>
+> 游戏内【寻访记录】只支持查询**最近 90 天**的记录，更早的记录会被官方接口丢弃且无法再取回。
+> 每次拉取都是增量合并到你选定的基底 UIGF 文件，所以请定期拉取并保留该文件 —— 它是你抽卡历史的唯一长期存档。
+
+> [!NOTE]
+> The exported file also carries a non-standard top-level `non_pull_events` key. The official record API mixes
+> non-pull events (such as the headhunting testimonial granted every 60 pulls) into the same list; they are kept
+> verbatim under that key instead of the UIGF `list`, so `list` stays "one entry = one pull" for every other
+> UIGF tool. Other tools can safely ignore the extra key.
+>
+> 导出的文件里还有一个非 UIGF 标准的顶层键 `non_pull_events`。官方记录接口会把非抽卡事件（例如每 60 抽发放的
+> 【寻访情报书】）混在同一个列表里返回；这些事件被原样保存在该键下，而不是放进 UIGF 的 `list`，这样 `list` 对
+> 所有第三方 UIGF 工具都保持「每一条都是一次抽卡」的语义。其它工具可以直接忽略这个键。
+
 
 
 ## Compatibility / 兼容性

@@ -265,10 +265,9 @@ struct FetcherView: View {
                     onProgress: { _ in }
                 )
                 isRunning = false
-                appendLogs(["",
-                            "====================",
-                            "完成! 本次新增 \(result.newCount) 条, 文件内共计 \(result.totalCount) 条",
-                            "已保存至: \(result.url.path)"])
+                appendLogs(["", "===================="]
+                           + result.summaryLines
+                           + ["已保存至: \(result.url.path)"])
                 finishedURL = result.url
             } catch is CancellationError {
                 isRunning = false

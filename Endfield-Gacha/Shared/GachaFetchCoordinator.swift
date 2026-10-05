@@ -4,12 +4,12 @@
 //
 //  AsyncFetch-Design v5 —— Swift 异步编排层。
 //
-//  职责: 网络 / 重试 / 节流 / 取消 / 日志 / 落地 / 按目标文件加锁。
+//  职责: 网络 / 节流 / 取消 / 日志 / 落地 / 按目标文件加锁。
 //  C++ 状态机核心 (FetchSession) 只做解析/去重/排序/写盘, 不碰网络。
 //
 //  工作分配:
 //    - URLSession (无 delegate) async API: HTTP 请求 / 等待 / 超时 / 取消
-//    - 协调器 (Task.sleep):              分类重试 + 退避 / 300·500ms 节流
+//    - 协调器 (Task.sleep):              300·500ms 节流 (每页只请求一次, 不重试)
 //    - .utility 串行队列 (onWork):        URL 构造/解析/去重/排序/写临时文件/落地/临时文件清理 (即所有 bridge + 文件 IO)
 //    - 进程级 FetchDestinationGate actor:  目标文件互斥 (lease)
 //    - MainActor:                         UI / 进度 / 状态
@@ -22,22 +22,61 @@ import Foundation
 // MARK: - 值类型 / 错误
 
 struct PrepareOutcome: Sendable { let ok: Bool; let baseRecordCount: Int; let logs: [String]; let errorMessage: String? }
-struct ExportOutcome:  Sendable { let ok: Bool; let newCount: Int; let totalCount: Int; let tempFilePath: String?; let errorMessage: String? }
+struct ExportOutcome:  Sendable {
+    let ok: Bool
+    let newCount: Int            // 本次新增的抽卡记录数
+    let totalCount: Int          // 文件内抽卡记录总数
+    let newEventCount: Int       // 本次新增的非抽卡事件数
+    let totalEventCount: Int     // 文件内非抽卡事件总数
+    let migratedLegacyCount: Int // 从旧版 list 迁出的非抽卡事件条数
+    let tempFilePath: String?
+    let errorMessage: String?
+}
 enum   NextRequest:    Sendable { case ready(urlString: String, logs: [String]); case done(logs: [String]); case fatal(String) }
+// 任一卡池失败 (.poolError / .fatal) 都放弃整次拉取, 所有卡池同等对待, 与 Windows 端一致。
+//   重构寻访上线前曾有过 .poolSkipped (首页失败只跳过该池); 首期已开启, 这一档已移除。
 enum   PageStatus:     Sendable { case continueFetching; case poolError(String?); case fatal(String) }
 struct PageOutcome:    Sendable { let status: PageStatus; let totalNewSoFar: Int; let delayMs: Int; let logs: [String] }
 
 /// run 的返回值。设计 E 原型只返回 URL; 这里附带 newCount/totalCount,
 /// 以便 View 维持"本次新增 X / 文件内共计 Y"的提示 (小幅扩展, 不改架构)。
-struct FetchResult: Sendable { let url: URL; let newCount: Int; let totalCount: Int }
+struct FetchResult: Sendable {
+    let url: URL
+    let newCount: Int
+    let totalCount: Int
+    let newEventCount: Int
+    let totalEventCount: Int
+    let migratedLegacyCount: Int
+}
+
+extension FetchResult {
+    /// 拉取结束时给用户看的摘要 (两个 View 共用同一套文案, 避免口径分叉)。
+    ///
+    /// v0.1.4.2: 抽卡与非抽卡事件分开报 —— 此前 newCount 含事件而 totalCount 只数抽卡,
+    /// 于是"本次新增 3 条, 共计 101 条"里两个数字不是一回事, 用户会以为丢了记录。
+    /// 旧版记录迁移也必须在这里点名: 它会让"共计"与上一次对不上,
+    /// 不解释的话同样像是数据丢了。
+    var summaryLines: [String] {
+        var lines = ["完成! 本次新增 \(newCount) 条抽卡记录, 文件内共计 \(totalCount) 条"]
+        if newEventCount > 0 || totalEventCount > 0 {
+            lines.append("另有非抽卡事件 (如「寻访情报书」): 本次新增 \(newEventCount) 条, 共计 \(totalEventCount) 条")
+            lines.append("  (存放在 non_pull_events 键里, 不计入抽卡统计, 也不会被第三方 UIGF 工具当成抽卡)")
+        }
+        if migratedLegacyCount > 0 {
+            // 不要断言"共计会比上次少 N 条": 同一次拉取通常还新增了记录, 净变化多半是正的,
+            // 给一个能被上一行数字直接证伪的说法, 比不解释更让人以为丢了数据。
+            lines.append("其中 \(migratedLegacyCount) 条旧版误存在抽卡数组里的非抽卡事件已移出抽卡统计 (改存到 non_pull_events), \"共计\"因此少算这 \(migratedLegacyCount) 条")
+        }
+        return lines
+    }
+}
 
 enum FetchError: Error {
     case prepareFailed(String)
     case session(String)               // 状态机 fatal / URL 不可解析 / 非 HTTP 响应
     case auth(Int)                     // 401/403 (token/权限失效) → 终止, 保留原文件
-    case unexpectedHTTPStatus(Int)     // 其它非预期状态码 (含跟随/未跟随重定向后的 3xx 等)
-    case networkPermanent(Int, String) // 非瞬时 URLError: TLS/证书/不支持的 URL 等 (纯错误处理, 非安全策略)
-    case networkExhausted(Int)         // 瞬时错误重试耗尽
+    case unexpectedHTTPStatus(Int)     // 其它非 200 状态码 (含其余 2xx、3xx、429、5xx) → 终止, 不重试
+    case network(Int, String)          // URLError: 超时/断网/DNS/TLS 等传输失败 → 终止, 不重试 (纯错误处理, 非安全策略)
     case poolFailed(String)            // 任一卡池返回错误/空响应 → 放弃整次拉取, 保护已有数据
     case write(String)
     case destinationBusy(String)       // 同一目标文件已有拉取在写 (多窗口)
@@ -51,8 +90,7 @@ extension FetchError {
         case .session(let m):            return m
         case .auth(let c):               return "鉴权失败 (HTTP \(c)): token 可能已失效, 请重新从游戏内复制链接"
         case .unexpectedHTTPStatus(let c): return "服务器返回非预期状态码 (HTTP \(c))"
-        case .networkPermanent(_, let d): return "网络错误: \(d)"
-        case .networkExhausted(let c):   return "网络多次重试仍失败 (\(c))"
+        case .network(_, let d):         return "网络错误: \(d)"
         case .poolFailed(let m):         return "卡池拉取失败,已放弃本次更新以保护已有数据:\(m)"
         case .write(let m):              return m
         case .destinationBusy(let name): return "目标文件 \(name) 正在被另一处拉取写入, 请稍后再试"
@@ -101,7 +139,7 @@ final class GachaFetchCoordinator: Sendable {
 
     init() {
         let cfg = URLSessionConfiguration.ephemeral     // 内存级会话: 不把缓存/Cookie/凭据写入磁盘 (不保证服务端/代理/CDN 返回最新内容)
-        cfg.waitsForConnectivity = true                 // 网络暂不可用时等待恢复
+        cfg.waitsForConnectivity = false                // 网络不可用时立即失败, 不等待恢复 (任何失败都直接中止整次拉取)
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 120
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData   // 忽略本地 URLCache；服务端、代理或 CDN 仍可能返回缓存响应。
@@ -185,17 +223,17 @@ extension GachaFetchCoordinator {
                 request = try makeRequest(urlString)
             }
 
-            let data = try await fetchPageData(request, onLogBatch: onLogBatch)
+            let data = try await fetchPageData(request)
             try Task.checkCancellation()
 
             let outcome: PageOutcome = try await onWork {
                 let o = box.session!.ingestResponseData(data)
                 let st: PageStatus
                 switch o.status {
-                case .continue:   st = .continueFetching
-                case .poolError:  st = .poolError(o.poolErrorMessage)
-                case .fatalError: st = .fatal(o.fatalErrorMessage ?? "未知 ingest 错误")
-                @unknown default: st = .fatal("未知 ingest 状态")
+                case .continue:    st = .continueFetching
+                case .poolError:   st = .poolError(o.poolErrorMessage)
+                case .fatalError:  st = .fatal(o.fatalErrorMessage ?? "未知 ingest 错误")
+                @unknown default:  st = .fatal("未知 ingest 状态")
                 }
                 return PageOutcome(status: st, totalNewSoFar: o.totalNewSoFar, delayMs: o.delayMsBeforeNext, logs: o.logs)
             }
@@ -220,7 +258,10 @@ extension GachaFetchCoordinator {
         try Task.checkCancellation()
         let summary: ExportOutcome = try await onWork {
             let s = box.session!.writeExport()
-            return ExportOutcome(ok: s.ok, newCount: s.newCount, totalCount: s.totalCount,
+            return ExportOutcome(ok: s.ok,
+                                 newCount: s.newCount, totalCount: s.totalCount,
+                                 newEventCount: s.newEventCount, totalEventCount: s.totalEventCount,
+                                 migratedLegacyCount: s.migratedLegacyCount,
                                  tempFilePath: s.tempFilePath, errorMessage: s.errorMessage)
         }
         guard summary.ok, let tmp = summary.tempFilePath else { throw FetchError.write(summary.errorMessage ?? "写盘失败") }
@@ -228,7 +269,11 @@ extension GachaFetchCoordinator {
         do {
             try Task.checkCancellation()                 // 临时文件写完后、覆盖前 再查一次
             let saved = try await onWork { try Self.finalizeExport(tempPath: tmp, destination: destination, kind: destinationKind) }
-            return FetchResult(url: saved, newCount: summary.newCount, totalCount: summary.totalCount)
+            return FetchResult(url: saved,
+                               newCount: summary.newCount, totalCount: summary.totalCount,
+                               newEventCount: summary.newEventCount,
+                               totalEventCount: summary.totalEventCount,
+                               migratedLegacyCount: summary.migratedLegacyCount)
         } catch {
             try? await onWork { try FileManager.default.removeItem(at: URL(fileURLWithPath: tmp)) }
             throw error
@@ -236,52 +281,25 @@ extension GachaFetchCoordinator {
     }
 }
 
-// MARK: - fetchPageData (分类重试 + 408 + Retry-After 钳 30s; 无安全校验)
+// MARK: - fetchPageData (每页只请求一次, 不重试; 无安全校验)
 extension GachaFetchCoordinator {
-    // 正常翻页结束信号来自 ingest, 不走这里; 重试只针对传输/HTTP, 且发生在 cursor 未推进、
-    // bridge 未 ingest 时, 重发同一 request 不污染 C++ 状态。
-    private func fetchPageData(_ request: URLRequest,
-                               onLogBatch: @escaping @MainActor @Sendable ([String]) -> Void) async throws -> Data {
-        let maxRetries = 3; var attempt = 0
-        while true {
-            try Task.checkCancellation()
-            do {
-                let (data, resp) = try await urlSession.data(for: request)
-                guard let http = resp as? HTTPURLResponse else { throw FetchError.session("收到非 HTTP 响应") }
-                switch http.statusCode {
-                case 200...299: return data
-                case 401, 403:  throw FetchError.auth(http.statusCode)
-                case 429:
-                    attempt += 1; if attempt > maxRetries { throw FetchError.networkExhausted(429) }
-                    let w = retryAfterSeconds(http) ?? backoff(attempt)
-                    await MainActor.run { onLogBatch(["  [限流] 429, \(Int(w))s 后重试 (\(attempt)/\(maxRetries))"]) }
-                    try await Task.sleep(for: .seconds(w))
-                case 408, 500...599:                                   // 408 也纳入有限重试
-                    attempt += 1; if attempt > maxRetries { throw FetchError.networkExhausted(http.statusCode) }
-                    let w = backoff(attempt)
-                    await MainActor.run { onLogBatch(["  [服务器] HTTP \(http.statusCode), 重试 (\(attempt)/\(maxRetries))"]) }
-                    try await Task.sleep(for: .seconds(w))
-                default: throw FetchError.unexpectedHTTPStatus(http.statusCode)   // 含 3xx 等
-                }
-            } catch let e as URLError {
-                if Task.isCancelled || e.code == .cancelled { throw CancellationError() }
-                guard isTransient(e) else { throw FetchError.networkPermanent(e.errorCode, e.localizedDescription) }
-                attempt += 1; if attempt > maxRetries { throw FetchError.networkExhausted(e.errorCode) }
-                let w = backoff(attempt)
-                await MainActor.run { onLogBatch(["  [网络] \(e.localizedDescription), 重试 (\(attempt)/\(maxRetries))"]) }
-                try await Task.sleep(for: .seconds(w))
+    // 与 Windows 端一致: 每页只发一次请求, 传输失败、超时或任何非 200 状态码都直接抛错,
+    // 由 run 整次中止 (不写盘)。此前这里对瞬时网络错误 / 429 / 408 / 5xx 做最多 3 次退避
+    // 重试, 并把任意 2xx 当作成功。
+    private func fetchPageData(_ request: URLRequest) async throws -> Data {
+        try Task.checkCancellation()
+        do {
+            let (data, resp) = try await urlSession.data(for: request)
+            guard let http = resp as? HTTPURLResponse else { throw FetchError.session("收到非 HTTP 响应") }
+            switch http.statusCode {
+            case 200:      return data
+            case 401, 403: throw FetchError.auth(http.statusCode)
+            default:       throw FetchError.unexpectedHTTPStatus(http.statusCode)   // 含其余 2xx / 3xx / 429 / 5xx
             }
+        } catch let e as URLError {
+            if Task.isCancelled || e.code == .cancelled { throw CancellationError() }
+            throw FetchError.network(e.errorCode, e.localizedDescription)
         }
-    }
-    private func backoff(_ n: Int) -> Double { [0.5, 1, 2][min(max(n,1),3) - 1] }
-    private func isTransient(_ e: URLError) -> Bool {
-        [.timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
-         .notConnectedToInternet, .dnsLookupFailed, .resourceUnavailable].contains(e.code)
-    }
-    // 钳到 [0,30] + 有限 + 非负; 不支持 HTTP-date 时回退指数退避。
-    private func retryAfterSeconds(_ r: HTTPURLResponse) -> Double? {
-        guard let raw = r.value(forHTTPHeaderField: "Retry-After"), let s = Double(raw), s.isFinite, s >= 0 else { return nil }
-        return min(s, 30)
     }
 }
 

@@ -64,6 +64,7 @@ struct ContentView: View {
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
 
                 // ============ 文字输出区 ============
+                // v0.1.4.0: 文本从 3 个池块扩到 4 个, 高度 180 → 230 以免一上来就要滚动
                 ScrollView {
                     Text(outputText)
                         .font(.system(size: 12, design: .monospaced))
@@ -71,14 +72,14 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                 }
-                .frame(height: 180)
+                .frame(height: 230)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(.separator, lineWidth: 1)
                 )
 
-                // ============ 图表区(4 宫格) ============
+                // ============ 图表区(2 列 × 4 行) ============
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
                         .fill(.background.secondary)
@@ -91,25 +92,25 @@ struct ContentView: View {
                         ProgressView("分析中...")
                             .controlSize(.large)
                     } else {
-                        // 无导入数据时也显示 6 张图: 传入空的 AnalysisBundle,
+                        // 无导入数据时也显示 8 张图: 使用后端生成并缓存的空池数据,
                         // ChartGridView 内部 ECDFCanvas / MRLCanvas 在 count_all=0
                         // && count_up=0 时会画坐标轴 + 理论参考曲线 + 灰色
                         // "暂无出金数据" 提示 (v0.1.2.1 行为, 与 Windows / iOS 一致).
-                        let bundle = analysis ?? AnalysisBundle(
-                            statsChar:  ChartData(),
-                            statsJoint: ChartData(),
-                            statsWep:   ChartData()
-                        )
-                        ChartGridView(statsChar:  bundle.statsChar,
-                                      statsJoint: bundle.statsJoint,
-                                      statsWep:   bundle.statsWep,
+                        let bundle = analysis ?? AnalysisBundle.placeholder
+                        ChartGridView(statsChar:     bundle.statsChar,
+                                      statsJoint:    bundle.statsJoint,
+                                      statsRefactor: bundle.statsRefactor,
+                                      statsWep:      bundle.statsWep,
                                       layout: .grid2x2)
                             .padding(10)
                     }
                 }
                 // ScrollView 里 maxHeight: .infinity 会塌缩,这里给 minHeight 保底,
-                // 让图表始终有足够的展示高度(原窗口约 1100,减去顶部配置+文字输出后剩 ~750)
-                .frame(maxWidth: .infinity, minHeight: 750)
+                // 让图表始终有足够的展示高度。
+                // v0.1.4.0: 从 3 行图表扩到 4 行 (新增重构寻访), minHeight 750 → 1000,
+                // 每行仍有 ~250pt。窗口装不下时由外层 ScrollView 兜住 (与 Windows 端
+                // v0.1.4.0 加垂直滚动条的做法同源 —— 那边本来就是参考这里做的)。
+                .frame(maxWidth: .infinity, minHeight: 1000)
             }
             .padding(16)
         }
@@ -144,6 +145,7 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $isHovering) { providers in
             // 防御:正在处理时拒绝新拖入,避免双开 worker
             guard !isProcessing, let provider = providers.first else { return false }
+            // 三份配置都按原值传给分析器; 名单被清空就按空名单算 (见 AppConfig)
             let capturedChars = config.chars
             let capturedPool  = config.pool
             let capturedWeps  = config.weps
@@ -171,7 +173,8 @@ struct ContentView: View {
                     self.isProcessing = true
                     self.analysis = nil
                     self.outputText = "拉取完成,正在分析 \(url.path)..."
-                    runAnalysis(url: url, chars: config.chars, pool: config.pool, weps: config.weps)
+                    runAnalysis(url: url, chars: config.chars,
+                                pool: config.pool, weps: config.weps)
                 }
             }
         }
