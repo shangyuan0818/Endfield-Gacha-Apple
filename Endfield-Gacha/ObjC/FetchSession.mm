@@ -276,6 +276,20 @@ struct ScopeExit {
     ScopeExit& operator=(const ScopeExit&) = delete;
 };
 
+// 把 Unix 秒数格式化成 UTC+8 的 "YYYY-MM-DD HH:MM:SS", 返回写出的长度 (无法表示时为 0)。
+// time / export_time 与 "timezone": 8 固定使用 UTC+8 (国服与亚服的服务器时区), 不取导出设备
+// 的本地时区: 同一条记录在任何设备、任何季节写出的字符串都相同, 不受夏令时影响,
+// 也始终与 timezone 字段对得上。Windows 端的同名函数是同一套写法。
+inline int FormatUtc8Time(long long seconds, char* buf, size_t capacity) {
+    const time_t t = (time_t)(seconds + 8 * 3600);
+    struct tm tmv{};
+    if (!gmtime_r(&t, &tmv)) return 0;
+    const int n = snprintf(buf, capacity, "%04d-%02d-%02d %02d:%02d:%02d",
+                           tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
+                           tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    return n < 0 ? 0 : n;
+}
+
 // ============================================================
 //  缓冲写入 (64KB 栈缓冲; ok 跟踪 + 循环写入 + 短路; 整段从旧 worker 搬入)
 // ============================================================
@@ -355,20 +369,8 @@ struct BufferedWriter{
         WriteLit("\"");
     }
     void WriteTimeKV(std::string_view k, long long ms){
-        time_t t = ms/1000;
-        struct tm tmv{};
         char b[64];
-        int n = 0;
-        // v0.1.4.2: 必须检查返回值。时间戳来自外部文件, 被构造/损坏的值 (例如
-        //   "gacha_ts":"-9223372036854775808") 能被 ParseFullInt64 正常解析, 但 localtime_r
-        //   对无法表示的时间返回 NULL 且【不写出参】—— 旧写法随后直接读未初始化的 struct tm,
-        //   轻则把随机日期写进存档, 重则 UB。
-        if (localtime_r(&t, &tmv)) {
-            n = snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02d:%02d",
-                         tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
-                         tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-        }
-        if (n < 0) n = 0;
+        const int n = FormatUtc8Time(ms/1000, b, sizeof(b));
         WriteLit("            \"");
         Write(k);
         WriteLit("\": \"");
@@ -1369,18 +1371,9 @@ inline NSString* NSStr(std::string_view sv){
             // (例外: non_pull_events[].raw 里是服务器原始对象, 保持其原有的 camelCase,
             //  因为那一段是原样透传, 不做任何改写。)
             // ==========================================================
-            // 与 WriteTimeKV 同口径: 零初始化 + 检查返回值, 不在未初始化的 struct tm 上取字段。
-            time_t t = exp_ts;
-            struct tm tmv{};
-            const bool tmOk = (localtime_r(&t, &tmv) != nullptr);
+            // export_time 与每条记录的 time 同口径: 固定按 UTC+8 写出 (见 FormatUtc8Time)。
             char tbuf[64];
-            int tl = 0;
-            if (tmOk) {
-                tl = snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
-                              tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
-                              tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-            }
-            if (tl < 0) tl = 0;
+            const int tl = FormatUtc8Time(exp_ts, tbuf, sizeof(tbuf));
 
             // ---- info 块 ----
             w.WriteLit("{\n    \"info\": {\n");
@@ -1401,12 +1394,10 @@ inline NSString* NSStr(std::string_view sv){
             w.WriteLit("\"\n    },\n");
 
             // ---- endfield 数组 (单账号 → 单元素) ----
-            const int tzHours = tmOk ? (int)(tmv.tm_gmtoff / 3600) : 0;
+            // timezone 固定为 8: 文件里所有 time 都按 UTC+8 写出 (见 FormatUtc8Time), 两者一致。
             w.WriteLit("    \"endfield\": [\n        {\n");
             w.WriteLit("            \"uid\": \"0\",\n");
-            w.WriteLit("            \"timezone\": ");
-            { auto [p, e] = std::to_chars(nb, nb+32, tzHours); w.Write(nb, (size_t)(p-nb)); }
-            w.WriteLit(",\n");
+            w.WriteLit("            \"timezone\": 8,\n");
             w.WriteLit("            \"lang\": \"zh-cn\",\n");
             w.WriteLit("            \"list\": [\n");
 
