@@ -36,7 +36,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
-#include <utility>           // std::forward (ForEachJsonObject2 转发回调)
+#include <utility>           // std::forward (ForEachObjectInArray2 转发回调)
 #include <vector>
 
 #include <fcntl.h>
@@ -62,15 +62,6 @@ using JsonValueRef  = efjson::ValueRef;
 using JsonArrayScan = efjson::ArrayScan;
 using LocateResult  = efjson::LocateResult;
 
-inline size_t FindJsonKey2(std::string_view src, std::string_view key, size_t pos = 0) {
-    return efjson::FindKeyToken(src, key, pos);
-}
-inline std::string_view ExtractJsonValue2(std::string_view src, std::string_view key, bool isStr) {
-    return efjson::ExtractValue(src, key, isStr);
-}
-inline size_t SkipJsonValue2(std::string_view s, size_t i, JsonValueKind& kind) {
-    return efjson::SkipValue(s, i, kind);
-}
 inline JsonValueRef FindTopLevelValue2(std::string_view obj, std::string_view key) {
     return efjson::FindMember(obj, key);
 }
@@ -84,14 +75,10 @@ template<typename Cb>
 [[nodiscard]] JsonArrayScan ForEachObjectInArray2(std::string_view arrayText, Cb&& cb) {
     return efjson::ForEachObjectIn(arrayText, std::forward<Cb>(cb));
 }
-template<typename Cb>
-[[nodiscard]] JsonArrayScan ForEachJsonObject2(std::string_view src, std::string_view arrKey, Cb&& cb) {
-    return efjson::ForEachObjectByKey(src, arrKey, std::forward<Cb>(cb));
-}
 
 // 读一个【必须是整数】的字段: 接受 JSON 字符串与数字两种形态, 整串必须解析干净。
 //
-// v0.1.4.2: 存档里的 id / gacha_ts 此前用 ExtractJsonValue2(..., isStr=true) + 裸 from_chars 读,
+// v0.1.4.2: 存档里的 id / gacha_ts 此前用 efjson::ExtractValue(..., isStr=true) + 裸 from_chars 读,
 // 有三个静默失败: (a) 第三方 UIGF 导出器把 id 写成数字字面量 -> isStr 分支要求以 '"' 开头,
 // 直接返回空 -> 解析成 0; (b) "12ab" 被 from_chars 吃成 12; (c) 超 int64 时 from_chars 不写出参,
 // 仍是 0。id 同时是去重键, 塌成 0 之后 "触达本地老记录" 永不触发, 整段历史会被重复追加,
@@ -109,7 +96,7 @@ inline bool ReadIntegerField(std::string_view obj, std::string_view key, long lo
 
 // 读一个文本字段: 字符串取引号之间的原文 (转义不还原), 数字/布尔取字面量, 缺失/null 取空。
 //
-// v0.1.4.2: 存档字段此前一律用 ExtractJsonValue2(..., isStr=true) 读, 而它在"值不是以 \" 开头"
+// v0.1.4.2: 存档字段此前一律用 efjson::ExtractValue(..., isStr=true) 读, 而它在"值不是以 \" 开头"
 // 时返回空视图。UIGF 的 endfield 段没有官方 schema, 第三方转换器把 rank_type 写成 JSON 数字
 // ("rank_type": 6) 很常见 —— 旧写法把它读成空, 再以 "rank_type": "" 原样回写, 覆盖用户唯一的
 // 长期存档, 稀有度就此永久消失; 分析端随后把这条当成"没出六星的一抽", 其后每个六星的保底
@@ -750,7 +737,7 @@ inline NSString* NSStr(std::string_view sv){
                             // 旧版根本没读过 kind / nameText, 凭空写上就是伪造。因此迁移来的
                             // raw 是 UIGF 形状 (snake_case), 与新拉取的服务器原始对象
                             // (camelCase) 形状不同 —— 这一差异本身就标明了它的来历。
-                            // v0.1.4.2 判据收紧: 旧写法用 ExtractJsonValue2(..., isStr=true) 判空,
+                            // v0.1.4.2 判据收紧: 旧写法用 efjson::ExtractValue(..., isStr=true) 判空,
                             //   而它在"值不是以 \" 开头"时也返回空视图 —— 于是 {"item_id":null,
                             //   "rank_type":6} 这种【第三方 UIGF 导出器很常见的写法】会被当成旧版
                             //   畸形记录搬进 non_pull_events, 一次真实六星就此从抽卡数组里消失,

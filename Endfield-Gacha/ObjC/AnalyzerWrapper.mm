@@ -155,15 +155,8 @@ using JsonValueKind = efjson::ValueKind;
 using JsonValueRef  = efjson::ValueRef;
 using JsonArrayScan = efjson::ArrayScan;
 
-inline size_t FindJsonKey(std::string_view src, std::string_view key, size_t pos = 0) {
-    return efjson::FindKeyToken(src, key, pos);
-}
 inline std::string_view ExtractJsonValue(std::string_view src, std::string_view key, bool isStr) {
     return efjson::ExtractValue(src, key, isStr);
-}
-template<typename Cb>
-[[nodiscard]] JsonArrayScan ForEachJsonObject(std::string_view src, std::string_view arrKey, Cb&& cb) {
-    return efjson::ForEachObjectByKey(src, arrKey, std::forward<Cb>(cb));
 }
 
 // 读 UIGF v4.2 存档里的抽卡记录数组: 结构路径 根.endfield[0].list 优先, 失败再回退全文找键。
