@@ -60,7 +60,6 @@ extension FetchResult {
         var lines = ["完成! 本次新增 \(newCount) 条抽卡记录, 文件内共计 \(totalCount) 条"]
         if newEventCount > 0 || totalEventCount > 0 {
             lines.append("另有非抽卡事件 (如「寻访情报书」): 本次新增 \(newEventCount) 条, 共计 \(totalEventCount) 条")
-            lines.append("  (存放在 non_pull_events 键里, 不计入抽卡统计, 也不会被第三方 UIGF 工具当成抽卡)")
         }
         if migratedLegacyCount > 0 {
             // 不要断言"共计会比上次少 N 条": 同一次拉取通常还新增了记录, 净变化多半是正的,
