@@ -1,32 +1,29 @@
 # Privacy Policy / 隐私政策
-**Last Updated: April 23, 2026**
+
+**Last Updated: October 5, 2026**
+
 ## English Version
-### 1. Introduction
-This Privacy Policy explains how **Endfield-Gacha** ("the App") handles your data. As a tool built with native macOS security standards, we prioritize your privacy and transparency.
-### 2. Permissions and Data Collection
-The App operates within the macOS App Sandbox environment and only requests the minimum permissions necessary to function:
- * **User-Selected File Access (Read/Write):** The App requires access to specific game log files or folders that **you manually select** via the macOS Open Panel. This is used solely to parse and save your gacha (pull) records. We do not access any files without your explicit interaction and selection.
- * **Outgoing Network Connections (Client):** The App accesses the internet to communicate with official game servers to fetch your latest gacha data.
-### 3. Data Usage and Storage
- * **Local Storage:** All gacha records and analyzed data are stored **locally** on your device.
- * **No Third-Party Servers:** We do not maintain any central servers. Your personal game data is never uploaded to, stored on, or shared with any third-party servers (other than the official game servers required for data fetching).
- * **No Tracking:** We do not use any analytics, tracking, or advertising SDKs.
-### 4. User Rights
-Since all data is stored locally, you have full control over your information. You can delete your data at any time by removing the App's local database or cache files.
-### 5. Contact
-If you have any questions about this Privacy Policy, please contact us via the project's GitHub repository.
+
+**Endfield-Gacha** ("the App") runs locally on iPhone, iPad and Mac. The developer does not collect any data.
+
+ * **Files:** The App reads only the record files (UIGF JSON) you select and writes only to the locations you choose. A temporary file used while fetching on iPhone and iPad is deleted afterwards.
+ * **Network:** The App connects only to the official game record servers (`ef-webview.gryphline.com` or `ef-webview.hypergryph.com`), using the record link you paste, to fetch your headhunting records. The link and the token inside it are used only for these requests and are not saved.
+ * **Storage:** Your records exist only in the files you save. On iPhone and iPad, the App also keeps your settings on the device. There is no account, no cloud sync and no developer server.
+ * **No Tracking:** The App contains no analytics, advertising or other third-party SDKs.
+
+To remove your data, delete your record files or the App itself.
+
+Questions: https://github.com/shangyuan0818/Endfield-Gacha-Apple/discussions
+
 ## 中文版
-### 1. 前言
-本隐私政策旨在说明 **Endfield-Gacha**（以下简称“本应用”）如何处理您的数据。作为一款遵循 macOS 原生安全标准构建的工具，我们高度重视您的隐私与透明度。
-### 2. 权限说明与数据收集
-本应用在 macOS App Sandbox（沙盒）环境下运行，仅申请实现核心功能所必需的最小权限：
- * **用户选定文件的读写权限：** 本应用需要访问由**您手动选择**的游戏日志文件或文件夹（通过 macOS 标准打开面板）。该权限仅用于解析和保存您的寻访（抽卡）记录。未经您的明确交互和选择，本应用不会访问任何其他文件。
- * **网络访问权限（客户端）：** 本应用需要访问互联网以连接官方游戏服务器，从而获取您最新的寻访数据。
-### 3. 数据使用与存储
- * **本地存储：** 所有的寻访记录和分析数据均**存储在您的本地设备**上。
- * **无第三方服务器：** 我们不维护任何中央服务器。您的个人游戏数据绝不会被上传、存储或共享给任何第三方服务器（获取数据所需的官方游戏服务器除外）。
- * **无追踪：** 我们不使用任何分析、追踪或广告 SDK。
-### 4. 用户权利
-由于所有数据均存储在本地，您拥有对信息的完全控制权。您可以随时通过删除应用的本地数据库或缓存文件来清除所有数据。
-### 5. 联系方式
-如果您对本隐私政策有任何疑问，请通过本项目的 GitHub 仓库与我们联系。
+
+**Endfield-Gacha**（以下简称“本应用”）在 iPhone、iPad 与 Mac 上本地运行。开发者不收集任何数据。
+
+ * **文件：** 本应用只读取您选择的记录文件（UIGF JSON），只写入您指定的位置。在 iPhone 与 iPad 上拉取时使用的临时文件会在完成后删除。
+ * **网络：** 本应用只连接游戏官方的记录服务器（`ef-webview.gryphline.com` 或 `ef-webview.hypergryph.com`），使用您粘贴的记录链接获取寻访（抽卡）记录。链接及其中的 token 仅用于这些请求，不会被保存。
+ * **存储：** 您的记录只存在于您保存的文件中。在 iPhone 与 iPad 上，本应用还会在设备上保存您的设置。没有账号，没有云同步，也没有开发者服务器。
+ * **无追踪：** 本应用不含任何统计、广告或其它第三方 SDK。
+
+如需清除数据，删除您的记录文件或本应用即可。
+
+如有疑问：https://github.com/shangyuan0818/Endfield-Gacha-Apple/discussions
